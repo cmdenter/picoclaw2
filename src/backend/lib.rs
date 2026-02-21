@@ -155,7 +155,7 @@ impl Default for AgentConfig {
             persona: "PicoClaw".into(),
             system_prompt: "You are PicoClaw, an autonomous AI agent running fully on-chain on the Internet Computer. Be concise, precise, and helpful.".into(),
             allowed_tools: vec![],
-            api_key: Some("cpk_b02e50bef1024a6d8d3cc0d3b07dbb78".into()),
+            api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
             model: "deepseek-ai/DeepSeek-V3".into(),
             api_endpoint: "https://api.chutes.ai/v1/chat/completions".into(),
             max_context_messages: 1, // >0 = include truncated last-assistant reply for continuity
