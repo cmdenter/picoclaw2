@@ -809,8 +809,12 @@ Rules: no articles, no filler, pipe-delimit facts, abbreviate aggressively. ONLY
                 return Err(format!("LLM API error ({}): {}", status_code, body_str));
             }
 
-            let raw = extract_content(&response.body)
-                .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
+            // Body is already the extracted content (transform stripped non-deterministic fields)
+            let raw = String::from_utf8_lossy(&response.body).into_owned();
+            if raw.is_empty() {
+                bump_metric(|m| { m.errors += 1; m.total_cycles_spent += actual_spent; });
+                return Err("Empty response from LLM compression".into());
+            }
 
             let (new_i, new_t, new_e) = parse_tiers(&raw);
 
@@ -957,8 +961,12 @@ async fn chat(prompt: String) -> Result<String, String> {
                 return Err(format!("LLM API error ({}): {}", status_code, body_str));
             }
 
-            let reply = extract_content(&response.body)
-                .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
+            // Body is already the extracted content (transform stripped non-deterministic fields)
+            let reply = String::from_utf8_lossy(&response.body).into_owned();
+            if reply.is_empty() {
+                bump_metric(|m| m.errors += 1);
+                return Err("Empty response from LLM".into());
+            }
 
             log_message("assistant", &reply);
 
@@ -992,6 +1000,12 @@ async fn send_prompt_to_llm(prompt: String) -> Result<String, String> {
 fn transform_llm_response(raw: TransformArgs) -> MgmtHttpResponse {
     let mut r = raw.response;
     r.headers.clear();
+    // Extract only the content field from the response body.
+    // The full body contains non-deterministic fields (id, created, chutes_verification)
+    // that differ per subnet node, causing consensus failure.
+    if let Some(content) = extract_content(&r.body) {
+        r.body = content.into_bytes();
+    }
     r
 }
 
