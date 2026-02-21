@@ -800,6 +800,15 @@ Rules: no articles, no filler, pipe-delimit facts, abbreviate aggressively. ONLY
             let bal_after = ic_cdk::api::canister_balance128();
             let actual_spent = bal_before.saturating_sub(bal_after) as u64;
 
+            // Check for non-2xx HTTP status
+            let status = response.status.0.to_u64_digits();
+            let status_code = if status.is_empty() { 0u64 } else { status[0] };
+            if status_code < 200 || status_code >= 300 {
+                let body_str = String::from_utf8_lossy(&response.body);
+                bump_metric(|m| { m.errors += 1; m.total_cycles_spent += actual_spent; });
+                return Err(format!("LLM API error ({}): {}", status_code, body_str));
+            }
+
             let raw = extract_content(&response.body)
                 .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
 
@@ -937,12 +946,21 @@ async fn chat(prompt: String) -> Result<String, String> {
         Ok((response,)) => {
             let bal_after = ic_cdk::api::canister_balance128();
             let actual_spent = bal_before.saturating_sub(bal_after) as u64;
+            bump_metric(|m| m.total_cycles_spent += actual_spent);
+
+            // Check for non-2xx HTTP status
+            let status = response.status.0.to_u64_digits();
+            let status_code = if status.is_empty() { 0u64 } else { status[0] };
+            if status_code < 200 || status_code >= 300 {
+                let body_str = String::from_utf8_lossy(&response.body);
+                bump_metric(|m| m.errors += 1);
+                return Err(format!("LLM API error ({}): {}", status_code, body_str));
+            }
 
             let reply = extract_content(&response.body)
                 .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
 
             log_message("assistant", &reply);
-            bump_metric(|m| m.total_cycles_spent += actual_spent);
 
             // Schedule background compression if needed
             if should_compress(&config) {

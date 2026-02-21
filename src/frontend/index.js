@@ -183,6 +183,7 @@ async function sendMessage() {
   scrollBottom();
   showTyping(true);
 
+  let failed = false;
   try {
     const result = await actor.chat(text);
     showTyping(false);
@@ -190,12 +191,18 @@ async function sendMessage() {
       addMessage('assistant', result.Ok);
     } else {
       addMessage('system', 'Error: ' + result.Err);
+      failed = true;
     }
     refreshMetrics();
     if (memPanelOpen) setTimeout(refreshMemory, 1500);
   } catch (e) {
     showTyping(false);
     addMessage('system', 'Call failed: ' + e.message);
+    failed = true;
+  }
+  if (failed) {
+    input.value = text;
+    autoResize(input);
   }
   sending = false;
   scrollBottom();
