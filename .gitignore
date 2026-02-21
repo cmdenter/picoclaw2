@@ -1,0 +1,6 @@
+target/
+.dfx/
+node_modules/
+.env
+*.swp
+.DS_Store

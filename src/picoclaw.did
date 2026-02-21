@@ -1,0 +1,84 @@
+type AgentConfig = record {
+    persona : text;
+    system_prompt : text;
+    allowed_tools : vec text;
+    api_key : opt text;
+    model : text;
+    api_endpoint : text;
+    max_context_messages : nat32;
+    max_response_bytes : nat64;
+    allowed_callers : vec principal;
+    compress_interval : nat32;
+};
+
+type Message = record {
+    role : text;
+    content : text;
+    timestamp : nat64;
+};
+
+type PicoState = record {
+    identity : text;
+    thread : text;
+    episodes : text;
+    priors : text;
+    updated_at : nat64;
+    msg_id_at_compress : nat64;
+};
+
+type Metrics = record {
+    total_calls : nat64;
+    total_cycles_spent : nat64;
+    total_messages : nat64;
+    errors : nat64;
+};
+
+type HttpHeader = record { name : text; value : text };
+type HttpResponse = record { status : nat; headers : vec HttpHeader; body : vec nat8 };
+type TransformArgs = record { response : HttpResponse; context : vec nat8 };
+
+type IngressHttpRequest = record {
+    method : text;
+    url : text;
+    headers : vec record { text; text };
+    body : vec nat8;
+};
+
+type IngressHttpResponse = record {
+    status_code : nat16;
+    headers : vec record { text; text };
+    body : vec nat8;
+    upgrade : opt bool;
+};
+
+service : {
+    // Admin
+    "set_api_key" : (text) -> (variant { Ok : null; Err : text });
+    "configure" : (AgentConfig) -> (variant { Ok : null; Err : text });
+    "get_config_public" : () -> (AgentConfig) query;
+
+    // Chat
+    "chat" : (text) -> (variant { Ok : text; Err : text });
+    "send_prompt_to_llm" : (text) -> (variant { Ok : text; Err : text });
+
+    // History
+    "get_history" : (nat64) -> (vec Message) query;
+    "clear_history" : () -> (variant { Ok : nat64; Err : text });
+
+    // PicoState (tiered memory — I:identity T:thread E:episodes P:priors)
+    "get_notes" : () -> (PicoState) query;
+    "clear_notes" : () -> (variant { Ok : null; Err : text });
+    "compress_context" : () -> (variant { Ok : text; Err : text });
+
+    // Monitoring
+    "get_metrics" : () -> (Metrics) query;
+    "cycle_balance" : () -> (nat) query;
+    "get_queue_length" : () -> (nat64) query;
+
+    // Transform (internal)
+    "transform_llm_response" : (TransformArgs) -> (HttpResponse) query;
+
+    // HTTP Gateway
+    "http_request" : (IngressHttpRequest) -> (IngressHttpResponse) query;
+    "http_request_update" : (IngressHttpRequest) -> (IngressHttpResponse);
+}

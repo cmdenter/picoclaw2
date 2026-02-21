@@ -1,0 +1,17 @@
+{
+  "canisters": {
+    "picoclaw": {
+      "type": "rust",
+      "package": "picoclaw",
+      "candid": "src/picoclaw.did",
+      "optimize": "cycles"
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": "",
+      "args": ""
+    }
+  },
+  "version": 1
+}
