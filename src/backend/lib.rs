@@ -157,7 +157,7 @@ impl Default for AgentConfig {
             allowed_tools: vec![],
             api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
             model: "deepseek-ai/DeepSeek-V3".into(),
-            api_endpoint: "https://api.chutes.ai/v1/chat/completions".into(),
+            api_endpoint: "https://llm.chutes.ai/v1/chat/completions".into(),
             max_context_messages: 1, // >0 = include truncated last-assistant reply for continuity
             max_response_bytes: 8192,
             allowed_callers: vec![],
