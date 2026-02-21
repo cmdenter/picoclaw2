@@ -5,6 +5,11 @@
       "package": "picoclaw",
       "candid": "src/picoclaw.did",
       "optimize": "cycles"
+    },
+    "picoclaw_frontend": {
+      "type": "assets",
+      "source": ["frontend"],
+      "dependencies": ["picoclaw"]
     }
   },
   "defaults": {

@@ -217,7 +217,7 @@ textarea::placeholder{color:var(--text3)}
 
     <label>Backend Canister ID</label>
     <input id="cfgCanisterId" placeholder="e.g. rrkah-fqaaa-aaaaa-aaaaq-cai">
-    <div class="hint">Your picoclaw canister ID from <code>dfx canister id picoclaw</code></div>
+    <div class="hint">Your picoclaw backend canister ID (shown after deploy)</div>
 
     <label>Network</label>
     <select id="cfgNetwork">
@@ -236,9 +236,6 @@ textarea::placeholder{color:var(--text3)}
 
 <script type="module">
 import { HttpAgent, Actor, Principal, AuthClient } from './dfinity.bundle.js';
-
-// ── Environment detection ────────────────────────────────────────────
-const isLocal = window.location.hostname.endsWith('.localhost') || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.port === '4943';
 
 // ── Candid IDL (matches picoclaw.did) ────────────────────────────────
 function idlFactory({ IDL }) {
@@ -288,20 +285,19 @@ function idlFactory({ IDL }) {
   });
 }
 
-// ── Canister ID detection ────────────────────────────────────────────
-function detectCanisterId() {
+// ── Backend canister ID ──────────────────────────────────────────────
+function detectBackendCanisterId() {
+  // From ?backendId= query param
   const params = new URLSearchParams(window.location.search);
-  const qid = params.get('canisterId');
-  if (qid) return qid;
-  const host = window.location.hostname;
-  const match = host.match(/^([a-z0-9-]+)\.(?:raw\.)?(?:localhost|icp0\.io|ic0\.app)/);
-  if (match) return match[1];
+  const bid = params.get('backendId');
+  if (bid) { localStorage.setItem('pc_canister_id', bid); return bid; }
+  // From localStorage (set via settings modal)
   return localStorage.getItem('pc_canister_id') || '';
 }
 
 // ── State ────────────────────────────────────────────────────────────
-let canisterId = detectCanisterId();
-let network = isLocal ? 'local' : 'ic';
+let canisterId = detectBackendCanisterId();
+let network = 'ic';
 let sending = false;
 let actor = null;
 let authClient = null;
@@ -361,8 +357,7 @@ async function loginPlug() {
   }
   try {
     const whitelist = canisterId ? [canisterId] : [];
-    const host = icHost();
-    await window.ic.plug.requestConnect({ whitelist, host });
+    await window.ic.plug.requestConnect({ whitelist, host: 'https://icp-api.io' });
     const p = await window.ic.plug.agent.getPrincipal();
     principalId = p.toText();
     identity = { getPrincipal: () => p, _plug: true };
@@ -429,18 +424,10 @@ document.addEventListener('click', (e) => {
 });
 
 // ── Actor ────────────────────────────────────────────────────────────
-function icHost() {
-  if (isLocal) return 'http://127.0.0.1:4943';
-  return 'https://icp-api.io';
-}
-
 async function createActor() {
   if (!canisterId) return null;
   try {
-    const agent = new HttpAgent({ host: icHost() });
-    if (isLocal) {
-      agent.fetchRootKey().catch(() => {});
-    }
+    const agent = new HttpAgent({ host: 'https://icp-api.io' });
     actor = Actor.createActor(idlFactory, { agent, canisterId });
     return actor;
   } catch (e) {
@@ -717,16 +704,21 @@ document.getElementById('input').addEventListener('input', updateSendBtn);
 
 // ── Init ─────────────────────────────────────────────────────────────
 try {
-  await initAuth();
-  if (canisterId && identity) {
-    await createActor();
-    checkHealth();
-    loadHistory();
-    refreshMemory();
+  if (!canisterId) {
+    // No backend canister configured — show settings
+    toggleSettings();
+    toast('Enter your PicoClaw backend canister ID');
+  } else {
+    await initAuth();
+    if (identity) {
+      await createActor();
+      checkHealth();
+      loadHistory();
+      refreshMemory();
+    }
   }
 } catch(e) {
   console.error('[PicoClaw] Init error:', e);
-  document.title = 'ERROR: ' + e.message;
 }
 setInterval(refreshMetrics, 30000);
 </script>

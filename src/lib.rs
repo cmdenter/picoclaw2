@@ -1150,20 +1150,7 @@ fn http_request(req: IngressHttpRequest) -> IngressHttpResponse {
     }
 
     match get_path(&req.url) {
-        "/" => {
-            let html = include_bytes!("frontend.html");
-            IngressHttpResponse {
-                status_code: 200,
-                headers: vec![
-                    ("Content-Type".into(), "text/html; charset=utf-8".into()),
-                    ("Cache-Control".into(), "no-cache".into()),
-                ],
-                body: html.to_vec(),
-                upgrade: None,
-            }
-        }
-
-        "/health" => json_response(200,
+        "/" | "/health" => json_response(200,
             "{\"status\":\"ok\",\"canister\":\"picoclaw\",\"version\":\"0.2.0\"}"
         ),
 
