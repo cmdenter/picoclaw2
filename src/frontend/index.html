@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>PicoClaw</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--surface3:#22222e;
+  --border:#2a2a3a;--text:#e4e4ef;--text2:#8888a0;--text3:#55556a;
+  --accent:#6c5ce7;--accent2:#a29bfe;--accent-glow:rgba(108,92,231,0.15);
+  --green:#00e676;--red:#ff5252;--orange:#ffab40;
+  --radius:12px;--radius-sm:8px;
+}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;overflow:hidden}
+
+/* Layout */
+#app{display:flex;flex-direction:column;height:100dvh;max-width:860px;margin:0 auto}
+
+/* Header */
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.logo{display:flex;align-items:center;gap:8px;font-weight:700;font-size:18px}
+.logo svg{width:28px;height:28px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0}
+.status-dot.ok{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.err{background:var(--red)}
+.header-actions{display:flex;gap:4px}
+.icon-btn{background:none;border:1px solid transparent;color:var(--text2);cursor:pointer;padding:8px;border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;transition:all .15s}
+.icon-btn:hover,.icon-btn:active{background:var(--surface2);color:var(--text);border-color:var(--border)}
+.icon-btn svg{width:20px;height:20px}
+
+/* Stats bar */
+.stats-bar{display:flex;gap:16px;padding:8px 16px;border-bottom:1px solid var(--border);background:var(--surface);font-size:12px;color:var(--text2);flex-shrink:0;overflow-x:auto}
+.stat{display:flex;align-items:center;gap:4px;white-space:nowrap}
+.stat b{color:var(--text);font-weight:600}
+
+/* Chat area */
+.chat-area{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth}
+.chat-area::-webkit-scrollbar{width:4px}
+.chat-area::-webkit-scrollbar-track{background:transparent}
+.chat-area::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+
+/* Messages */
+.msg{max-width:85%;padding:10px 14px;border-radius:var(--radius);font-size:14px;line-height:1.55;word-wrap:break-word;white-space:pre-wrap}
+.msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+.msg.assistant{align-self:flex-start;background:var(--surface2);border:1px solid var(--border);border-bottom-left-radius:4px}
+.msg.system{align-self:center;background:transparent;color:var(--text3);font-size:12px;text-align:center;padding:4px 12px}
+.msg .ts{display:block;font-size:10px;opacity:.5;margin-top:4px}
+
+/* Typing indicator */
+.typing{align-self:flex-start;padding:12px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);border-bottom-left-radius:4px;display:none}
+.typing.show{display:flex}
+.typing span{width:6px;height:6px;background:var(--text3);border-radius:50%;animation:bounce .6s infinite alternate}
+.typing span:nth-child(2){animation-delay:.2s}
+.typing span:nth-child(3){animation-delay:.4s}
+@keyframes bounce{to{opacity:.3;transform:translateY(-4px)}}
+
+/* Input area */
+.input-area{padding:12px 16px;border-top:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.input-row{display:flex;gap:8px;align-items:flex-end}
+textarea{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);padding:10px 14px;font-size:14px;font-family:inherit;resize:none;min-height:44px;max-height:120px;line-height:1.4;outline:none;transition:border-color .15s}
+textarea:focus{border-color:var(--accent)}
+textarea::placeholder{color:var(--text3)}
+.send-btn{width:44px;height:44px;border:none;border-radius:var(--radius);background:var(--accent);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .15s}
+.send-btn:hover{background:var(--accent2)}
+.send-btn:disabled{opacity:.3;cursor:not-allowed}
+.send-btn svg{width:20px;height:20px}
+
+/* Toast */
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 16px;border-radius:var(--radius);font-size:13px;z-index:200;opacity:0;transition:opacity .3s}
+.toast.show{opacity:1}
+
+/* PicoMem panel */
+.picomem-toggle{display:flex;align-items:center;gap:6px;padding:6px 16px;border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0}
+.picomem-toggle button{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+.picomem-toggle button:hover{border-color:var(--accent);color:var(--accent)}
+.picomem-toggle button.active{background:var(--accent-glow);border-color:var(--accent);color:var(--accent2)}
+.picomem-toggle .mem-label{font-size:11px;color:var(--text3);margin-left:auto}
+.picomem{display:none;flex-direction:column;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg);max-height:45dvh;overflow-y:auto;flex-shrink:0}
+.picomem.show{display:flex}
+.picomem::-webkit-scrollbar{width:4px}
+.picomem::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.tier{border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);overflow:hidden}
+.tier-head{display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--surface2);border-bottom:1px solid var(--border);font-size:11px;font-weight:700}
+.tier-head .tag{padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.5px}
+.tier-head .tag-i{background:rgba(0,230,118,.12);color:var(--green)}
+.tier-head .tag-t{background:rgba(108,92,231,.15);color:var(--accent2)}
+.tier-head .tag-e{background:rgba(255,171,64,.12);color:var(--orange)}
+.tier-head .tag-p{background:rgba(255,82,82,.1);color:var(--red)}
+.tier-head .tier-name{color:var(--text2)}
+.tier-head .tier-size{margin-left:auto;color:var(--text3);font-weight:400;font-size:10px}
+.tier-body{padding:8px 10px;font-size:12px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-word;min-height:24px;font-family:'SF Mono',Menlo,monospace,monospace}
+.tier-body.empty{color:var(--text3);font-style:italic;font-family:inherit}
+.picomem-actions{display:flex;gap:6px;margin-top:2px}
+.picomem-actions button{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:11px;cursor:pointer;transition:all .15s}
+.picomem-actions button:hover{border-color:var(--accent);color:var(--accent)}
+.picomem-actions button:disabled{opacity:.3;cursor:not-allowed}
+.picomem-actions button.danger:hover{border-color:var(--red);color:var(--red)}
+.picomem-ts{font-size:10px;color:var(--text3);margin-left:auto;align-self:center}
+
+/* Auth */
+.auth-bar{display:flex;align-items:center;gap:6px;position:relative}
+.auth-btn{padding:6px 12px;border-radius:var(--radius-sm);font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--accent);background:transparent;color:var(--accent);transition:all .15s}
+.auth-btn:hover{background:var(--accent);color:#fff}
+.auth-btn.logout{border-color:var(--border);color:var(--text2)}
+.auth-btn.logout:hover{border-color:var(--red);color:var(--red);background:transparent}
+.principal-tag{font-size:10px;color:var(--text2);background:var(--surface2);padding:4px 8px;border-radius:var(--radius-sm);font-family:monospace;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.auth-dropdown{position:absolute;top:100%;right:0;margin-top:6px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden;display:none;z-index:50;min-width:160px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.auth-dropdown.show{display:block}
+.auth-dropdown button{display:flex;align-items:center;gap:8px;width:100%;padding:10px 14px;border:none;background:transparent;color:var(--text);font-size:13px;cursor:pointer;transition:background .15s}
+.auth-dropdown button:hover{background:var(--surface2)}
+.auth-dropdown button svg{width:18px;height:18px;flex-shrink:0}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">
+      <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" stroke="var(--accent)" stroke-width="2"/><circle cx="11" cy="13" r="2.5" fill="var(--accent2)"/><circle cx="21" cy="13" r="2.5" fill="var(--accent2)"/><path d="M10 20c1.5 2.5 4 4 6 4s4.5-1.5 6-4" stroke="var(--accent2)" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>PicoClaw</span>
+      <span class="status-dot" id="statusDot"></span>
+    </div>
+    <div class="header-actions">
+      <div class="auth-bar" id="authBar">
+        <button class="auth-btn" onclick="window._pc.toggleAuthDropdown()">Connect</button>
+        <div class="auth-dropdown" id="authDropdown">
+          <button onclick="window._pc.loginII()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent2)" stroke-width="2"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="16" r="1.5"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+            Internet Identity
+          </button>
+          <button onclick="window._pc.loginPlug()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2"><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/><circle cx="12" cy="12" r="4"/></svg>
+            Plug Wallet
+          </button>
+        </div>
+      </div>
+      <button class="icon-btn" onclick="window._pc.loadHistory()" title="Refresh history">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="stats-bar" id="statsBar">
+    <div class="stat">Messages: <b id="statMsgs">-</b></div>
+    <div class="stat">Calls: <b id="statCalls">-</b></div>
+    <div class="stat">Cycles: <b id="statCycles">-</b></div>
+    <div class="stat">Queue: <b id="statQueue">-</b></div>
+  </div>
+
+  <div class="picomem-toggle">
+    <button id="memToggleBtn" onclick="window._pc.toggleMemPanel()">PicoMem</button>
+    <span class="mem-label" id="memStatus"></span>
+  </div>
+
+  <div class="picomem" id="memPanel">
+    <div class="tier">
+      <div class="tier-head"><span class="tag tag-i">I</span><span class="tier-name">Identity</span><span class="tier-size" id="tierISize">0/256</span></div>
+      <div class="tier-body empty" id="tierI">empty</div>
+    </div>
+    <div class="tier">
+      <div class="tier-head"><span class="tag tag-t">T</span><span class="tier-name">Thread</span><span class="tier-size" id="tierTSize">0/600</span></div>
+      <div class="tier-body empty" id="tierT">empty</div>
+    </div>
+    <div class="tier">
+      <div class="tier-head"><span class="tag tag-e">E</span><span class="tier-name">Episodes</span><span class="tier-size" id="tierESize">0/900</span></div>
+      <div class="tier-body empty" id="tierE">empty</div>
+    </div>
+    <div class="tier">
+      <div class="tier-head"><span class="tag tag-p">P</span><span class="tier-name">Priors</span><span class="tier-size" id="tierPSize">0/128</span></div>
+      <div class="tier-body empty" id="tierP">empty</div>
+    </div>
+    <div class="picomem-actions">
+      <button onclick="window._pc.refreshMemory()">Refresh</button>
+      <button onclick="window._pc.triggerCompress()" id="compressBtn">Compress Now</button>
+      <button class="danger" onclick="window._pc.clearMemory()" id="clearMemBtn">Clear Memory</button>
+      <span class="picomem-ts" id="memTs"></span>
+    </div>
+  </div>
+
+  <div class="chat-area" id="chatArea">
+    <div class="msg system">Connect a wallet to start chatting with PicoClaw on-chain.</div>
+  </div>
+
+  <div class="typing" id="typing"><span></span><span></span><span></span></div>
+
+  <div class="input-area">
+    <div class="input-row">
+      <textarea id="input" rows="1" placeholder="Message PicoClaw..." onkeydown="window._pc.handleKey(event)" oninput="window._pc.autoResize(this)"></textarea>
+      <button class="send-btn" id="sendBtn" onclick="window._pc.sendMessage()" disabled>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="module" src="index.js"></script>
+</body>
+</html>

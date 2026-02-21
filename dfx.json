@@ -1,22 +1,18 @@
 {
   "canisters": {
     "picoclaw": {
-      "type": "rust",
+      "candid": "src/backend/picoclaw.did",
       "package": "picoclaw",
-      "candid": "src/picoclaw.did",
-      "optimize": "cycles"
+      "type": "rust"
     },
-    "picoclaw_frontend": {
-      "type": "assets",
-      "source": ["frontend"],
-      "dependencies": ["picoclaw"]
+    "frontend": {
+      "dependencies": ["picoclaw"],
+      "frontend": {
+        "entrypoint": "src/frontend/index.html"
+      },
+      "source": ["src/frontend/dist"],
+      "type": "assets"
     }
   },
-  "defaults": {
-    "build": {
-      "packtool": "",
-      "args": ""
-    }
-  },
-  "version": 1
+  "output_env_file": ".env"
 }

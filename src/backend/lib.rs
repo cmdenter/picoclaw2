@@ -155,7 +155,7 @@ impl Default for AgentConfig {
             persona: "PicoClaw".into(),
             system_prompt: "You are PicoClaw, an autonomous AI agent running fully on-chain on the Internet Computer. Be concise, precise, and helpful.".into(),
             allowed_tools: vec![],
-            api_key: None,
+            api_key: Some("cpk_b02e50bef1024a6d8d3cc0d3b07dbb78".into()),
             model: "deepseek-ai/DeepSeek-V3".into(),
             api_endpoint: "https://api.chutes.ai/v1/chat/completions".into(),
             max_context_messages: 1, // >0 = include truncated last-assistant reply for continuity
@@ -452,10 +452,13 @@ fn require_authorized() -> Result<(), String> {
     if ic_cdk::api::is_controller(&caller) {
         return Ok(());
     }
-    let allowed = CONFIG.with(|c| {
-        c.borrow().get().allowed_callers.iter().any(|p| *p == caller)
-    });
-    if allowed { Ok(()) } else { Err("Access denied".into()) }
+    let callers = CONFIG.with(|c| c.borrow().get().allowed_callers.clone());
+    // If allowlist is empty, permit any authenticated principal
+    if callers.is_empty() || callers.iter().any(|p| *p == caller) {
+        Ok(())
+    } else {
+        Err("Access denied".into())
+    }
 }
 
 fn bump_metric(f: impl FnOnce(&mut Metrics)) {

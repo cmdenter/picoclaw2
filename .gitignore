@@ -4,3 +4,5 @@ node_modules/
 .env
 *.swp
 .DS_Store
+src/frontend/dist/
+src/declarations/
