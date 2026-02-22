@@ -668,6 +668,26 @@ async fn pico_scrape(target_url: &str) -> Result<String, String> {
         .map_err(|_| "Error decoding scraped content".into())
 }
 
+/// Wasm-side search intent detection — zero cycles, 100% reliable.
+fn detect_search_query(text: &str) -> Option<String> {
+    if text.contains("http://") || text.contains("https://") {
+        return None;
+    }
+    let lower = text.to_lowercase();
+    let triggers = [
+        "news", "latest", "recent", "today", "right now", "currently",
+        "price of", "price for", "search for", "look up", "google",
+        "what's happening", "what happened", "who won", "who is winning",
+        "weather in", "weather for", "score", "update on", "tell me about",
+        "what is", "who is", "where is", "when did", "how much",
+    ];
+    if triggers.iter().any(|t| lower.contains(t)) {
+        Some(text.chars().take(200).collect())
+    } else {
+        None
+    }
+}
+
 /// Parse OpenAI function-calling tool_calls from raw JSON response.
 /// Handles both string args `"arguments":"{\"query\":\"...\"}"` and
 /// raw object args `"arguments":{"query":"..."}`.
@@ -1085,7 +1105,8 @@ async fn chat(prompt: String) -> Result<String, String> {
 
     log_message("user", &prompt);
 
-    // If user included a URL, scrape it and augment the prompt
+    // Priority: URL scrape > keyword search > normal chat
+    // Search happens BEFORE the LLM call so results are in the prompt
     let mut augmented_prompt = prompt.clone();
     if let Some(url) = extract_url(&prompt) {
         let url_owned = url.to_string();
@@ -1097,6 +1118,18 @@ async fn chat(prompt: String) -> Result<String, String> {
             }
             Err(e) => {
                 augmented_prompt = format!("{}\n\n[Web scrape failed: {}]", prompt, e);
+            }
+        }
+    } else if let Some(query) = detect_search_query(&prompt) {
+        match pico_search(&query).await {
+            Ok(results) => {
+                let label: String = query.chars().take(60).collect();
+                store_web_entry(&format!("search: {}", label), &results);
+                let truncated: String = results.chars().take(6000).collect();
+                augmented_prompt = format!("{}\n\n[Search: {}]\n{}", prompt, query, truncated);
+            }
+            Err(e) => {
+                augmented_prompt = format!("{}\n\n[Search failed: {}]", prompt, e);
             }
         }
     }
@@ -1305,36 +1338,6 @@ fn clear_web_memory() -> Result<(), String> {
     WEB_MEM.with(|m| {
         let mut map = m.borrow_mut();
         for i in 0u8..12 { let _ = map.remove(&i); }
-    });
-    Ok(())
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  Model selector
-// ═══════════════════════════════════════════════════════════════════════
-
-const AVAILABLE_MODELS: &[&str] = &[
-    "deepseek-ai/DeepSeek-V3",
-    "deepseek-ai/DeepSeek-R1",
-    "MiniMaxAI/MiniMax-M2.5-TEE",
-    "Qwen/Qwen3-235B-A22B",
-    "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
-    "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
-];
-
-#[ic_cdk::query]
-fn list_models() -> Vec<String> {
-    AVAILABLE_MODELS.iter().map(|s| s.to_string()).collect()
-}
-
-#[ic_cdk::update]
-fn set_model(model_id: String) -> Result<(), String> {
-    require_authorized()?;
-    CONFIG.with(|c| {
-        let mut cell = c.borrow_mut();
-        let mut cfg = cell.get().clone();
-        cfg.model = model_id;
-        let _ = cell.set(cfg);
     });
     Ok(())
 }
@@ -1560,13 +1563,13 @@ fn init() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     restore_counters();
-    // Migrate system prompt to latest version with web_search tool awareness
+    // Reset model to DeepSeek-V3 and update system prompt
     CONFIG.with(|c| {
         let mut cell = c.borrow_mut();
         let mut cfg = cell.get().clone();
-        if !cfg.system_prompt.contains("web_search") {
-            cfg.system_prompt = AgentConfig::default().system_prompt;
-            let _ = cell.set(cfg);
-        }
+        let defaults = AgentConfig::default();
+        cfg.model = defaults.model;
+        cfg.system_prompt = defaults.system_prompt;
+        let _ = cell.set(cfg);
     });
 }

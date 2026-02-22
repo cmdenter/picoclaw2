@@ -81,9 +81,6 @@ service : {
     "get_web_memory" : () -> (vec WebEntry) query;
     "clear_web_memory" : () -> (variant { Ok : null; Err : text });
 
-    // Model selector
-    "list_models" : () -> (vec text) query;
-    "set_model" : (text) -> (variant { Ok : null; Err : text });
 
     // Monitoring
     "get_metrics" : () -> (Metrics) query;
