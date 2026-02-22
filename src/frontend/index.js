@@ -23,6 +23,7 @@ const memStatus = document.getElementById('memStatus');
 const memTs     = document.getElementById('memTs');
 const webMemBody  = document.getElementById('webMemBody');
 const webMemCount = document.getElementById('webMemCount');
+const modelSelect = document.getElementById('modelSelect');
 
 // ── State ────────────────────────────────────────────────────────────
 let actor = picoclaw;
@@ -132,6 +133,7 @@ async function loginII() {
   toast('II connected: ' + principalId.slice(0, 8) + '...');
   syncSend();
   checkHealth();
+  loadModels();
 }
 
 async function loginPlug() {
@@ -154,6 +156,7 @@ async function loginPlug() {
     toast('Plug connected: ' + principalId.slice(0, 8) + '...');
     syncSend();
     checkHealth();
+    loadModels();
   } catch(e) {
     console.error('Plug login failed:', e);
     toast('Plug connection failed');
@@ -225,6 +228,38 @@ async function refreshMetrics() {
       : '';
     statCost.textContent = '$' + (spent * 1.33 / 1e12).toFixed(4);
   } catch {}
+}
+
+async function loadModels() {
+  if (!actor || !identity) return;
+  try {
+    const [r, cfg] = await Promise.all([
+      actor.list_models(),
+      actor.get_config_public(),
+    ]);
+    const models = r?.Ok || [];
+    modelSelect.innerHTML = '';
+    for (const id of models) {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = id.split('/').pop();
+      if (id === cfg.model) opt.selected = true;
+      modelSelect.appendChild(opt);
+    }
+  } catch (e) {
+    console.warn('Models load:', e);
+  }
+}
+
+async function switchModel(modelId) {
+  if (!actor || !identity || !modelId) return;
+  try {
+    const r = await actor.set_model(modelId);
+    if (r?.Ok != null) toast('Model: ' + modelId.split('/').pop());
+    else toast('Set model error: ' + (r?.Err || 'unknown'));
+  } catch (e) {
+    toast('Switch failed: ' + (e?.message || e));
+  }
 }
 
 // ── History ──────────────────────────────────────────────────────────
@@ -399,6 +434,7 @@ window._pc = {
   sendMessage, loadHistory, handleKey, autoResize, stopQueue,
   toggleAuthDropdown, loginII, loginPlug,
   toggleMemPanel, refreshMemory, triggerCompress, clearMemory,
+  switchModel,
 };
 
 // ── Init ─────────────────────────────────────────────────────────────
@@ -407,6 +443,7 @@ syncSend();
 checkHealth();
 if (identity) {
   refreshMemory();
+  loadModels();
 } else {
   chatArea.innerHTML = '<div class="msg system">Connect a wallet to start chatting.</div>';
 }

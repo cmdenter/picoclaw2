@@ -150,7 +150,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             persona: "PicoClaw".into(),
-            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful.\nTool: [SEARCH: query] — output this tag to search the web. You will receive results and answer with them. Use for current events, news, prices, weather, scores, or any factual query you lack info on. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W]. Never say you cannot browse.".into(),
+            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only — no markdown, no ** or # formatting.\nTool: [SEARCH: query] — output this tag to search the web. You will receive results and answer with them. Use for current events, news, prices, weather, scores, or any factual query you lack info on. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W]. Never say you cannot browse.".into(),
             allowed_tools: vec![],
             api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
             model: "deepseek-ai/DeepSeek-V3".into(),
@@ -458,6 +458,9 @@ thread_local! {
 
     static MSG_COUNTER: RefCell<u64> = RefCell::new(0);
     static TASK_COUNTER: RefCell<u64> = RefCell::new(0);
+
+    // Model list cache: (model_ids, timestamp_nanos) — refreshed hourly
+    static MODEL_CACHE: RefCell<(Vec<String>, u64)> = RefCell::new((vec![], 0));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1259,6 +1262,89 @@ fn clear_web_memory() -> Result<(), String> {
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+//  Model selector
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Extract model IDs from OpenAI-format /v1/models JSON response.
+fn extract_model_ids(body: &[u8]) -> Vec<String> {
+    let s = match std::str::from_utf8(body) { Ok(s) => s, Err(_) => return vec![] };
+    let mut ids = Vec::new();
+    let needle = "\"id\":\"";
+    let mut pos = 0;
+    while let Some(start) = s[pos..].find(needle) {
+        let start = pos + start + needle.len();
+        if let Some(end) = s[start..].find('"') {
+            let id = &s[start..start + end];
+            if !id.is_empty() { ids.push(id.to_string()); }
+            pos = start + end + 1;
+        } else { break; }
+    }
+    ids
+}
+
+#[ic_cdk::update]
+async fn list_models() -> Result<Vec<String>, String> {
+    require_authorized()?;
+
+    // Return cache if fresh (< 1 hour)
+    let now = ic_cdk::api::time();
+    let cached = MODEL_CACHE.with(|c| {
+        let (ref models, ts) = *c.borrow();
+        if !models.is_empty() && now.saturating_sub(ts) < 3_600_000_000_000 {
+            Some(models.clone())
+        } else { None }
+    });
+    if let Some(models) = cached { return Ok(models); }
+
+    let config = get_config();
+    let api_key = config.api_key.as_deref()
+        .ok_or("API key not configured")?.to_string();
+
+    let models_url = config.api_endpoint
+        .trim_end_matches("/chat/completions")
+        .to_string() + "/models";
+
+    let request = HttpRequestArgs {
+        url: models_url,
+        method: HttpMethod::GET,
+        body: None,
+        max_response_bytes: Some(50_000),
+        transform: None,
+        headers: vec![
+            HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
+        ],
+        is_replicated: Some(false),
+    };
+
+    bump_metric(|m| m.total_calls += 1);
+    let bal_before = ic_cdk::api::canister_cycle_balance();
+    let response = mgmt_http_request(&request).await
+        .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Models fetch failed: {:?}", e) })?;
+    let bal_after = ic_cdk::api::canister_cycle_balance();
+    bump_metric(|m| m.total_cycles_spent += bal_before.saturating_sub(bal_after) as u64);
+
+    let ids = extract_model_ids(&response.body);
+    if ids.is_empty() {
+        return Err("No models found".into());
+    }
+
+    MODEL_CACHE.with(|c| *c.borrow_mut() = (ids.clone(), now));
+    Ok(ids)
+}
+
+#[ic_cdk::update]
+fn set_model(model_id: String) -> Result<(), String> {
+    require_authorized()?;
+    CONFIG.with(|c| {
+        let mut cell = c.borrow_mut();
+        let mut cfg = cell.get().clone();
+        cfg.model = model_id;
+        let _ = cell.set(cfg);
+    });
+    Ok(())
+}
+
 /// Manually trigger context compression.
 #[ic_cdk::update]
 async fn compress_context() -> Result<String, String> {
@@ -1480,4 +1566,13 @@ fn init() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     restore_counters();
+    // Migrate system prompt if it lacks the [SEARCH:] tool spec
+    CONFIG.with(|c| {
+        let mut cell = c.borrow_mut();
+        let mut cfg = cell.get().clone();
+        if !cfg.system_prompt.contains("[SEARCH:") {
+            cfg.system_prompt = AgentConfig::default().system_prompt;
+            let _ = cell.set(cfg);
+        }
+    });
 }
