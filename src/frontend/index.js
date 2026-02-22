@@ -30,6 +30,7 @@ const settingsModal = document.getElementById('settingsModal');
 const profileNameInput = document.getElementById('profileName');
 const nftGrid     = document.getElementById('nftGrid');
 const customAvatarInput = document.getElementById('customAvatarUrl');
+const nftBg       = document.getElementById('nftBg');
 
 // ── State ────────────────────────────────────────────────────────────
 let actor = picoclaw;
@@ -186,11 +187,12 @@ async function logout() {
   syncSend();
   statusDot.className = 'status-dot';
   chatArea.innerHTML = '<div class="msg system">Session ended. Connect to start chatting.</div>';
-  // Reset avatar and name
+  // Reset avatar, name, and background
   clawName.textContent = 'PicoClaw';
   avatarImg.style.display = 'none';
   avatarSvg.style.display = '';
   selectedNftUrl = '';
+  setNftBackground('');
   toast('Disconnected');
 }
 
@@ -411,6 +413,18 @@ async function clearMemory() {
 }
 
 // ── Profile / Settings ───────────────────────────────────────────────
+function setNftBackground(url) {
+  if (url) {
+    nftBg.style.backgroundImage = 'url(' + url + ')';
+    nftBg.classList.add('active');
+    document.body.classList.add('has-nft-bg');
+  } else {
+    nftBg.style.backgroundImage = '';
+    nftBg.classList.remove('active');
+    document.body.classList.remove('has-nft-bg');
+  }
+}
+
 async function loadProfile() {
   if (!actor || !identity) return;
   try {
@@ -430,6 +444,7 @@ async function loadProfile() {
       avatarSvg.style.display = '';
       selectedNftUrl = '';
     }
+    setNftBackground(p.avatar_url);
   } catch (e) {
     console.warn('Profile load:', e.message || e);
   }
@@ -485,6 +500,7 @@ async function saveProfile() {
       avatarSvg.style.display = '';
       selectedNftUrl = '';
     }
+    setNftBackground(url);
     closeSettings();
     toast('Profile saved');
   } catch (e) {

@@ -31,6 +31,11 @@ body::after{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
   animation:glow-drift 12s ease-in-out infinite alternate}
 @keyframes grid-pulse{0%{opacity:.6}100%{opacity:1}}
 @keyframes glow-drift{0%{transform:scale(1) translate(0,0)}100%{transform:scale(1.05) translate(10px,-10px)}}
+/* NFT background — replaces grid when avatar is set */
+#nftBg{position:fixed;inset:0;z-index:0;pointer-events:none;background-size:cover;background-position:center;background-repeat:no-repeat;display:none}
+#nftBg.active{display:block}
+#nftBg::after{content:'';position:absolute;inset:0;background:rgba(10,10,15,0.75)}
+body.has-nft-bg::before,body.has-nft-bg::after{display:none}
 
 /* Layout */
 #app{display:flex;flex-direction:column;height:100dvh;max-width:860px;margin:0 auto;position:relative;z-index:1}
@@ -163,6 +168,7 @@ textarea::placeholder{color:var(--text3)}
 </style>
 </head>
 <body>
+<div id="nftBg"></div>
 <div id="app">
   <header>
     <div class="logo">
