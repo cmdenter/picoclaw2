@@ -668,34 +668,17 @@ async fn pico_scrape(target_url: &str) -> Result<String, String> {
         .map_err(|_| "Error decoding scraped content".into())
 }
 
-/// Wasm-side search intent detection — zero cycles, 100% reliable.
-fn detect_search_query(text: &str) -> Option<String> {
-    if text.contains("http://") || text.contains("https://") {
-        return None;
-    }
-    let lower = text.to_lowercase();
-    let triggers = [
-        "news", "latest", "recent", "today", "right now", "currently",
-        "price of", "price for", "search for", "look up", "google",
-        "what's happening", "what happened", "who won", "who is winning",
-        "weather in", "weather for", "score", "update on", "tell me about",
-        "what is", "who is", "where is", "when did", "how much",
-    ];
-    if triggers.iter().any(|t| lower.contains(t)) {
-        Some(text.chars().take(200).collect())
-    } else {
-        None
-    }
+/// Check if response contains a tool_calls array (AI decided to use a tool).
+fn has_tool_call(body: &[u8]) -> bool {
+    std::str::from_utf8(body).map(|s| s.contains("\"tool_calls\"")).unwrap_or(false)
 }
 
-/// Parse OpenAI function-calling tool_calls from raw JSON response.
-/// Handles both string args `"arguments":"{\"query\":\"...\"}"` and
-/// raw object args `"arguments":{"query":"..."}`.
+/// Try to extract the search query from tool_calls arguments.
+/// Handles string args, raw object args, and various edge cases.
 fn extract_tool_query(body: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(body).ok()?;
-    if !s.contains("\"tool_calls\"") { return None; }
 
-    // Find "arguments": and check what follows
+    // Try parsing "arguments" value (could be string or object)
     let args_needle = "\"arguments\":";
     let args_pos = s.find(args_needle)? + args_needle.len();
     let rest = s[args_pos..].trim_start();
@@ -719,17 +702,28 @@ fn extract_tool_query(body: &[u8]) -> Option<String> {
         }
         out
     } else {
-        // Raw object format: {"query":"..."} — use as-is
-        rest.to_string()
+        // Raw object format: {"query":"..."} — take until closing }
+        let end = rest.find('}').unwrap_or(rest.len());
+        rest[..=end].to_string()
     };
 
-    // Extract "query":"<value>" from the args
+    // Try "query":"<value>"
     let qneedle = "\"query\":\"";
-    let qstart = args_str.find(qneedle)? + qneedle.len();
-    let qrest = &args_str[qstart..];
-    let qend = qrest.find('"').unwrap_or(qrest.len());
-    let query = &qrest[..qend];
-    if query.is_empty() { None } else { Some(query.to_string()) }
+    if let Some(qstart) = args_str.find(qneedle) {
+        let after = &args_str[qstart + qneedle.len()..];
+        let qend = after.find('"').unwrap_or(after.len());
+        let q = &after[..qend];
+        if !q.is_empty() { return Some(q.to_string()); }
+    }
+    // Try "query": "<value>" (with space)
+    let qneedle2 = "\"query\": \"";
+    if let Some(qstart) = args_str.find(qneedle2) {
+        let after = &args_str[qstart + qneedle2.len()..];
+        let qend = after.find('"').unwrap_or(after.len());
+        let q = &after[..qend];
+        if !q.is_empty() { return Some(q.to_string()); }
+    }
+    None
 }
 
 async fn pico_search(query: &str) -> Result<String, String> {
@@ -1105,8 +1099,7 @@ async fn chat(prompt: String) -> Result<String, String> {
 
     log_message("user", &prompt);
 
-    // Priority: URL scrape > keyword search > normal chat
-    // Search happens BEFORE the LLM call so results are in the prompt
+    // URL in user message? Auto-scrape via Jina Reader before LLM call
     let mut augmented_prompt = prompt.clone();
     if let Some(url) = extract_url(&prompt) {
         let url_owned = url.to_string();
@@ -1118,18 +1111,6 @@ async fn chat(prompt: String) -> Result<String, String> {
             }
             Err(e) => {
                 augmented_prompt = format!("{}\n\n[Web scrape failed: {}]", prompt, e);
-            }
-        }
-    } else if let Some(query) = detect_search_query(&prompt) {
-        match pico_search(&query).await {
-            Ok(results) => {
-                let label: String = query.chars().take(60).collect();
-                store_web_entry(&format!("search: {}", label), &results);
-                let truncated: String = results.chars().take(6000).collect();
-                augmented_prompt = format!("{}\n\n[Search: {}]\n{}", prompt, query, truncated);
-            }
-            Err(e) => {
-                augmented_prompt = format!("{}\n\n[Search failed: {}]", prompt, e);
             }
         }
     }
@@ -1174,8 +1155,15 @@ async fn chat(prompt: String) -> Result<String, String> {
 
     // Check for function calling tool_calls FIRST, then fall back to content
     let reply;
-    if let Some(query) = extract_tool_query(&response.body) {
-        // AI decided to search — execute and re-call with results
+    // Try parsing tool call query; if tool_calls present but parse fails, use user's prompt
+    let tool_query = if has_tool_call(&response.body) {
+        Some(extract_tool_query(&response.body).unwrap_or_else(|| prompt.clone()))
+    } else {
+        None
+    };
+
+    if let Some(query) = tool_query {
+        // AI decided to search — execute and re-call LLM with results
         let search_result = match pico_search(&query).await {
             Ok(results) => {
                 let label: String = query.chars().take(60).collect();
@@ -1208,16 +1196,9 @@ async fn chat(prompt: String) -> Result<String, String> {
         reply = extract_content(&resp2.body)
             .unwrap_or_else(|| "Search completed but failed to parse response".into());
     } else {
-        let content = extract_content(&response.body);
-        let resp_str = std::str::from_utf8(&response.body).unwrap_or("");
-        if content.is_none() && resp_str.contains("\"tool_calls\"") {
-            // Tool call detected but query parsing failed — log for debugging
+        reply = extract_content(&response.body).ok_or_else(|| {
             bump_metric(|m| m.errors += 1);
-            let snippet: String = resp_str.chars().take(500).collect();
-            return Err(format!("Tool call parse error. Response: {}", snippet));
-        }
-        reply = content.ok_or_else(|| {
-            bump_metric(|m| m.errors += 1);
+            let resp_str = std::str::from_utf8(&response.body).unwrap_or("");
             let snippet: String = resp_str.chars().take(300).collect();
             format!("Failed to parse LLM response: {}", snippet)
         })?;
