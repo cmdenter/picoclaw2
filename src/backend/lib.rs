@@ -646,7 +646,105 @@ fn extract_url(text: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-async fn pico_scrape(target_url: &str) -> Result<String, String> {
+// ── SmartSUI server constants ─────────────────────────────────────────
+const PICO_SERVER_URL: &str = "https://smartsui.io/api/intel";
+const PICO_SERVER_KEY: &str = "pico_ca06ade4ccc876a78cb50b7091cd0189ad77984af38f9d8e627214f97a9ef10d";
+
+/// Extract the "f" (facts) field from a server /api/intel JSON response.
+fn extract_intel_facts(body: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(body).ok()?;
+    // Check "ok":true
+    if !s.contains("\"ok\":true") && !s.contains("\"ok\": true") {
+        return None;
+    }
+    // Extract "f":"<value>"
+    let needle = "\"f\":\"";
+    let start = s.find(needle)? + needle.len();
+    let rest = &s[start..];
+    let mut result = String::new();
+    let mut chars = rest.chars();
+    loop {
+        match chars.next()? {
+            '"' => return Some(result),
+            '\\' => match chars.next()? {
+                '"' => result.push('"'),
+                '\\' => result.push('\\'),
+                'n' => result.push('\n'),
+                'r' => {},
+                't' => result.push('\t'),
+                'u' => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Ok(cp) = u32::from_str_radix(&hex, 16) {
+                        if let Some(c) = char::from_u32(cp) { result.push(c); }
+                    }
+                },
+                c => { result.push('\\'); result.push(c); }
+            },
+            c => result.push(c),
+        }
+    }
+}
+
+/// Search via SmartSUI server (stealth scraping + AI fact compression).
+async fn pico_search_server(query: &str) -> Result<String, String> {
+    let body_str = format!(
+        r#"{{"query":"{}","mode":"search","max_bytes":4000}}"#,
+        json_escape(query)
+    );
+    let request = HttpRequestArgs {
+        url: PICO_SERVER_URL.to_string(),
+        method: HttpMethod::POST,
+        body: Some(body_str.into_bytes()),
+        max_response_bytes: Some(6_000),
+        transform: None,
+        headers: vec![
+            HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
+            HttpHeader { name: "X-Api-Key".into(), value: PICO_SERVER_KEY.into() },
+        ],
+        is_replicated: Some(false),
+    };
+    bump_metric(|m| m.total_calls += 1);
+    let bal_before = ic_cdk::api::canister_cycle_balance();
+    let response = mgmt_http_request(&request).await
+        .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Server search failed: {:?}", e) })?;
+    let bal_after = ic_cdk::api::canister_cycle_balance();
+    bump_metric(|m| m.total_cycles_spent += bal_before.saturating_sub(bal_after) as u64);
+
+    extract_intel_facts(&response.body)
+        .ok_or_else(|| "No facts in server response".into())
+}
+
+/// Scrape via SmartSUI server (Scrapling stealth + AI compression).
+async fn pico_browse_server(target_url: &str) -> Result<String, String> {
+    let body_str = format!(
+        r#"{{"query":"extract content","mode":"browse","url":"{}","max_bytes":3000}}"#,
+        json_escape(target_url)
+    );
+    let request = HttpRequestArgs {
+        url: PICO_SERVER_URL.to_string(),
+        method: HttpMethod::POST,
+        body: Some(body_str.into_bytes()),
+        max_response_bytes: Some(5_000),
+        transform: None,
+        headers: vec![
+            HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
+            HttpHeader { name: "X-Api-Key".into(), value: PICO_SERVER_KEY.into() },
+        ],
+        is_replicated: Some(false),
+    };
+    bump_metric(|m| m.total_calls += 1);
+    let bal_before = ic_cdk::api::canister_cycle_balance();
+    let response = mgmt_http_request(&request).await
+        .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Server browse failed: {:?}", e) })?;
+    let bal_after = ic_cdk::api::canister_cycle_balance();
+    bump_metric(|m| m.total_cycles_spent += bal_before.saturating_sub(bal_after) as u64);
+
+    extract_intel_facts(&response.body)
+        .ok_or_else(|| "No content in server response".into())
+}
+
+/// Jina Reader fallback for scraping.
+async fn pico_scrape_jina(target_url: &str) -> Result<String, String> {
     let jina_url = format!("https://r.jina.ai/{}", target_url);
     let request = HttpRequestArgs {
         url: jina_url,
@@ -668,6 +766,14 @@ async fn pico_scrape(target_url: &str) -> Result<String, String> {
 
     String::from_utf8(response.body)
         .map_err(|_| "Error decoding scraped content".into())
+}
+
+/// Scrape a URL: try server first, fallback to Jina.
+async fn pico_scrape(target_url: &str) -> Result<String, String> {
+    match pico_browse_server(target_url).await {
+        Ok(content) if !content.is_empty() => Ok(content),
+        _ => pico_scrape_jina(target_url).await,
+    }
 }
 
 /// Check if response contains a tool_calls array (AI decided to use a tool).
@@ -759,7 +865,16 @@ fn is_search_refusal(reply: &str) -> bool {
     refusal
 }
 
+/// Search via SmartSUI server first, fallback to Google News RSS.
 async fn pico_search(query: &str) -> Result<String, String> {
+    match pico_search_server(query).await {
+        Ok(facts) if !facts.is_empty() && facts.len() > 20 => Ok(facts),
+        _ => pico_search_rss(query).await,
+    }
+}
+
+/// Google News RSS fallback search.
+async fn pico_search_rss(query: &str) -> Result<String, String> {
     let encoded: String = query.chars().map(|c| {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
             c.to_string()
@@ -769,7 +884,6 @@ async fn pico_search(query: &str) -> Result<String, String> {
             format!("%{:02X}", c as u32)
         }
     }).collect();
-    // Google News RSS: free, no auth, clean XML with headlines
     let search_url = format!(
         "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en", encoded
     );
@@ -777,7 +891,7 @@ async fn pico_search(query: &str) -> Result<String, String> {
         url: search_url,
         method: HttpMethod::GET,
         body: None,
-        max_response_bytes: Some(2_000_000), // 2MB — Google News RSS can be large
+        max_response_bytes: Some(2_000_000),
         transform: None,
         headers: vec![],
         is_replicated: Some(false),
@@ -791,7 +905,6 @@ async fn pico_search(query: &str) -> Result<String, String> {
 
     let xml = String::from_utf8(response.body)
         .map_err(|_| String::from("Error decoding search results"))?;
-    // Parse RSS: extract <title> entries (skip first 2 = feed-level titles)
     let mut results = String::with_capacity(2000);
     let mut count = 0u8;
     let mut pos = 0usize;
@@ -801,7 +914,7 @@ async fn pico_search(query: &str) -> Result<String, String> {
             let title = &xml[abs_start..abs_start + end];
             pos = abs_start + end + 8;
             count += 1;
-            if count <= 2 { continue; } // skip feed-level titles
+            if count <= 2 { continue; }
             if count > 12 { break; }
             results.push_str(&format!("{}. {}\n", count - 2, title));
         } else {
