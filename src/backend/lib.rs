@@ -150,7 +150,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             persona: "PicoClaw".into(),
-            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only — no markdown, no ** or # formatting.\nTool: [SEARCH: query] — output this tag to search the web. You will receive results and answer with them. Use for current events, news, prices, weather, scores, or any factual query you lack info on. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W]. Never say you cannot browse.".into(),
+            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only, no markdown formatting. You have a web_search tool — use it for any current events, news, prices, weather, scores, or real-time info. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W]. Never say you cannot browse or access the web.".into(),
             allowed_tools: vec![],
             api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
             model: "deepseek-ai/DeepSeek-V3".into(),
@@ -671,11 +671,35 @@ async fn pico_scrape(target_url: &str) -> Result<String, String> {
         .map_err(|_| "Error decoding scraped content".into())
 }
 
-fn extract_search_tag(reply: &str) -> Option<String> {
-    let start = reply.find("[SEARCH:")?;
-    let rest = &reply[start + 8..];
-    let end = rest.find(']')?;
-    let query = rest[..end].trim();
+/// Parse OpenAI function-calling tool_calls from raw JSON response.
+/// Extracts the "query" argument from a web_search tool call.
+fn extract_tool_query(body: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(body).ok()?;
+    if !s.contains("\"tool_calls\"") { return None; }
+    let needle = "\"arguments\":\"";
+    let start = s.find(needle)? + needle.len();
+    let rest = &s[start..];
+    // Unescape the JSON string value
+    let mut args = String::new();
+    let mut chars = rest.chars();
+    loop {
+        match chars.next()? {
+            '"' => break,
+            '\\' => match chars.next()? {
+                '"' => args.push('"'),
+                '\\' => args.push('\\'),
+                'n' => args.push('\n'),
+                c => { args.push('\\'); args.push(c); }
+            },
+            c => args.push(c),
+        }
+    }
+    // args = {"query":"latest news"} — extract the query value
+    let qneedle = "\"query\":\"";
+    let qstart = args.find(qneedle)? + qneedle.len();
+    let qrest = &args[qstart..];
+    let qend = qrest.find('"').unwrap_or(qrest.len());
+    let query = &qrest[..qend];
     if query.is_empty() { None } else { Some(query.to_string()) }
 }
 
@@ -828,14 +852,18 @@ fn build_messages_json(config: &AgentConfig, prompt: &str) -> String {
     json
 }
 
+const TOOLS_JSON: &str = r#","tools":[{"type":"function","function":{"name":"web_search","description":"Search the web for current information: news, prices, weather, sports, facts, or anything you need real-time data for. Always use this instead of saying you cannot browse.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}}}]"#;
+
 fn build_request_body(config: &AgentConfig, prompt: &str) -> Vec<u8> {
     let messages = build_messages_json(config, prompt);
-    let mut body = String::with_capacity(messages.len() + 128);
+    let mut body = String::with_capacity(messages.len() + 512);
     body.push_str("{\"model\":\"");
     body.push_str(&json_escape(&config.model));
     body.push_str("\",\"messages\":");
     body.push_str(&messages);
-    body.push_str(",\"temperature\":0.7,\"max_tokens\":2048}");
+    body.push_str(",\"temperature\":0.7,\"max_tokens\":2048");
+    body.push_str(TOOLS_JSON);
+    body.push('}');
     body.into_bytes()
 }
 
@@ -1102,50 +1130,52 @@ async fn chat(prompt: String) -> Result<String, String> {
         return Err(format!("API error ({}): {}", status_code, body_str));
     }
 
-    let mut reply = extract_content(&response.body)
-        .ok_or_else(|| {
-            bump_metric(|m| m.errors += 1);
-            "Failed to parse LLM response".to_string()
-        })?;
-
-    if reply.is_empty() {
-        bump_metric(|m| m.errors += 1);
-        return Err("Empty response from LLM".into());
-    }
-
-    // Tool use: if AI outputs [SEARCH: query], execute and re-call once
-    if let Some(query) = extract_search_tag(&reply) {
-        match pico_search(&query).await {
+    // Check for function calling tool_calls FIRST, then fall back to content
+    let reply;
+    if let Some(query) = extract_tool_query(&response.body) {
+        // AI decided to search — execute and re-call with results
+        let search_result = match pico_search(&query).await {
             Ok(results) => {
                 let label: String = query.chars().take(60).collect();
                 store_web_entry(&format!("search: {}", label), &results);
                 let truncated: String = results.chars().take(6000).collect();
-                let search_prompt = format!("{}\n\n[Search: {}]\n{}", prompt, query, truncated);
-                let body2 = build_request_body(&config, &search_prompt);
-                let req2 = HttpRequestArgs {
-                    url: config.api_endpoint.clone(),
-                    max_response_bytes: Some(config.max_response_bytes),
-                    method: HttpMethod::POST,
-                    headers: vec![
-                        HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
-                        HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
-                    ],
-                    body: Some(body2),
-                    transform: None,
-                    is_replicated: Some(false),
-                };
-                bump_metric(|m| m.total_calls += 1);
-                let b2 = ic_cdk::api::canister_cycle_balance();
-                if let Ok(resp2) = mgmt_http_request(&req2).await {
-                    let b3 = ic_cdk::api::canister_cycle_balance();
-                    bump_metric(|m| m.total_cycles_spent += b2.saturating_sub(b3) as u64);
-                    if let Some(r2) = extract_content(&resp2.body) {
-                        if !r2.is_empty() { reply = r2; }
-                    }
-                }
+                format!("[Search: {}]\n{}", query, truncated)
             }
-            Err(_) => {} // search failed, return original reply
-        }
+            Err(e) => format!("[Search failed: {}]", e),
+        };
+        let search_prompt = format!("{}\n\n{}", prompt, search_result);
+        let body2 = build_request_body(&config, &search_prompt);
+        let req2 = HttpRequestArgs {
+            url: config.api_endpoint.clone(),
+            max_response_bytes: Some(config.max_response_bytes),
+            method: HttpMethod::POST,
+            headers: vec![
+                HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
+                HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
+            ],
+            body: Some(body2),
+            transform: None,
+            is_replicated: Some(false),
+        };
+        bump_metric(|m| m.total_calls += 1);
+        let b2 = ic_cdk::api::canister_cycle_balance();
+        let resp2 = mgmt_http_request(&req2).await
+            .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Search follow-up failed: {:?}", e) })?;
+        let b3 = ic_cdk::api::canister_cycle_balance();
+        bump_metric(|m| m.total_cycles_spent += b2.saturating_sub(b3) as u64);
+        reply = extract_content(&resp2.body)
+            .unwrap_or_else(|| "Search completed but failed to parse response".into());
+    } else {
+        reply = extract_content(&response.body)
+            .ok_or_else(|| {
+                bump_metric(|m| m.errors += 1);
+                "Failed to parse LLM response".to_string()
+            })?;
+    }
+
+    if reply.is_empty() {
+        bump_metric(|m| m.errors += 1);
+        return Err("Empty response from LLM".into());
     }
 
     log_message("assistant", &reply);
@@ -1566,11 +1596,11 @@ fn init() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     restore_counters();
-    // Migrate system prompt if it lacks the [SEARCH:] tool spec
+    // Migrate system prompt to latest version with web_search tool awareness
     CONFIG.with(|c| {
         let mut cell = c.borrow_mut();
         let mut cfg = cell.get().clone();
-        if !cfg.system_prompt.contains("[SEARCH:") {
+        if !cfg.system_prompt.contains("web_search") {
             cfg.system_prompt = AgentConfig::default().system_prompt;
             let _ = cell.set(cfg);
         }
