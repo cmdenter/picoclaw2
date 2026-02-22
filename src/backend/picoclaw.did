@@ -33,6 +33,12 @@ type Metrics = record {
     errors : nat64;
 };
 
+type WebEntry = record {
+    url : text;
+    summary : text;
+    timestamp : nat64;
+};
+
 type HttpHeader = record { name : text; value : text };
 type HttpResponse = record { status : nat; headers : vec HttpHeader; body : vec nat8 };
 type TransformArgs = record { response : HttpResponse; context : vec nat8 };
@@ -69,6 +75,11 @@ service : {
     "get_notes" : () -> (PicoState) query;
     "clear_notes" : () -> (variant { Ok : null; Err : text });
     "compress_context" : () -> (variant { Ok : text; Err : text });
+
+    // Web memory (PicoBrowse)
+    "browse" : (text) -> (variant { Ok : text; Err : text });
+    "get_web_memory" : () -> (vec WebEntry) query;
+    "clear_web_memory" : () -> (variant { Ok : null; Err : text });
 
     // Monitoring
     "get_metrics" : () -> (Metrics) query;

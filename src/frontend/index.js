@@ -21,6 +21,8 @@ const memPanel  = document.getElementById('memPanel');
 const memToggle = document.getElementById('memToggleBtn');
 const memStatus = document.getElementById('memStatus');
 const memTs     = document.getElementById('memTs');
+const webMemBody  = document.getElementById('webMemBody');
+const webMemCount = document.getElementById('webMemCount');
 
 // ── State ────────────────────────────────────────────────────────────
 let actor = picoclaw;
@@ -318,10 +320,20 @@ function renderTier(elId, sizeId, text, max) {
   size.textContent = len + '/' + max;
 }
 
+function timeAgo(nsTimestamp) {
+  const secs = Math.floor((Date.now() - Number(nsTimestamp) / 1e6) / 1000);
+  if (secs < 60) return secs + 's ago';
+  if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+  return Math.floor(secs / 3600) + 'h ago';
+}
+
 async function refreshMemory() {
   if (!actor) return;
   try {
-    const s = await actor.get_notes();
+    const [s, webEntries] = await Promise.all([
+      actor.get_notes(),
+      actor.get_web_memory().catch(() => []),
+    ]);
     renderTier('tierI', 'tierISize', s.identity, 256);
     renderTier('tierT', 'tierTSize', s.thread, 600);
     renderTier('tierE', 'tierESize', s.episodes, 900);
@@ -332,6 +344,20 @@ async function refreshMemory() {
       memTs.textContent = 'never compressed';
     }
     memStatus.textContent = [s.identity, s.thread, s.episodes, s.priors].filter(x => x.length).length + '/4 tiers';
+
+    // Web memory
+    webMemCount.textContent = webEntries.length + '/12';
+    if (webEntries.length === 0) {
+      webMemBody.textContent = 'no lookups yet';
+      webMemBody.className = 'tier-body empty';
+    } else {
+      const lines = webEntries.map(e => {
+        const preview = e.summary.length > 80 ? e.summary.slice(0, 80) + '...' : e.summary;
+        return e.url + ' (' + timeAgo(e.timestamp) + '): ' + preview;
+      });
+      webMemBody.textContent = lines.join('\n');
+      webMemBody.className = 'tier-body';
+    }
   } catch (e) {
     toast('Memory fetch failed: ' + (e?.message || e));
   }
@@ -357,7 +383,10 @@ async function clearMemory() {
   if (!actor || !identity) return toast('Login first');
   if (!confirm('Clear all PicoMem tiers? This cannot be undone.')) return;
   try {
-    const r = await actor.clear_notes();
+    const [r, w] = await Promise.all([
+      actor.clear_notes(),
+      actor.clear_web_memory().catch(() => ({ Ok: null })),
+    ]);
     if (r?.Ok != null) { toast('Memory cleared'); await refreshMemory(); }
     else toast('Clear error: ' + (r?.Err || 'unknown'));
   } catch (e) {

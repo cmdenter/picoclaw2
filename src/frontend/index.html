@@ -174,6 +174,14 @@ textarea::placeholder{color:var(--text3)}
       <div class="tier-head"><span class="tag tag-p">P</span><span class="tier-name">Priors</span><span class="tier-size" id="tierPSize">0/128</span></div>
       <div class="tier-body empty" id="tierP">empty</div>
     </div>
+    <div class="tier" id="webMemTier">
+      <div class="tier-head">
+        <span class="tag" style="background:rgba(108,92,231,.15);color:var(--accent2)">W</span>
+        <span class="tier-name">Web Memory</span>
+        <span class="tier-size" id="webMemCount">0/12</span>
+      </div>
+      <div class="tier-body empty" id="webMemBody">no lookups yet</div>
+    </div>
     <div class="picomem-actions">
       <button onclick="window._pc.refreshMemory()">Refresh</button>
       <button onclick="window._pc.triggerCompress()" id="compressBtn">Compress Now</button>

@@ -357,6 +357,34 @@ impl Storable for PicoState {
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct WebEntry {
+    pub url: String,
+    pub summary: String,
+    pub timestamp: u64,
+}
+
+impl Storable for WebEntry {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = Vec::with_capacity(self.url.len() + self.summary.len() + 24);
+        write_str(&mut buf, &self.url);
+        write_str(&mut buf, &self.summary);
+        buf.extend_from_slice(&self.timestamp.to_le_bytes());
+        Cow::Owned(buf)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let d = bytes.as_ref();
+        let mut p = 0;
+        let url = read_str(d, &mut p);
+        let summary = read_str(d, &mut p);
+        let timestamp = read_u64(d, &mut p);
+        Self { url, summary, timestamp }
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 2048, is_fixed_size: false };
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct QueuedTask {
     pub prompt: String,
     pub caller: Principal,
@@ -417,6 +445,15 @@ thread_local! {
     );
     static TASK_QUEUE: RefCell<StableBTreeMap<u64, QueuedTask, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(3))))
+    );
+
+    // Web memory: ring buffer of 12 entries (MemoryId 5) + counter (MemoryId 6)
+    static WEB_MEM: RefCell<StableBTreeMap<u8, WebEntry, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(5))))
+    );
+    static WEB_COUNTER: RefCell<Cell<u64, Memory>> = RefCell::new(
+        Cell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(6))), 0u64)
+            .expect("web counter init")
     );
 
     static MSG_COUNTER: RefCell<u64> = RefCell::new(0);
@@ -600,6 +637,53 @@ fn parse_tiers(output: &str) -> (String, String, String) {
 }
 
 
+// ── Web browsing helpers ───────────────────────────────────────────────
+
+fn extract_url(text: &str) -> Option<&str> {
+    let start = text.find("https://").or_else(|| text.find("http://"))?;
+    let rest = &text[start..];
+    let end = rest.find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '>' || c == ')').unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+async fn pico_scrape(target_url: &str) -> Result<String, String> {
+    let jina_url = format!("https://r.jina.ai/{}", target_url);
+    let request = HttpRequestArgs {
+        url: jina_url,
+        method: HttpMethod::GET,
+        body: None,
+        max_response_bytes: Some(20_000),
+        transform: None,
+        headers: vec![],
+        is_replicated: Some(false),
+    };
+    bump_metric(|m| m.total_calls += 1);
+    let bal_before = ic_cdk::api::canister_cycle_balance();
+    let response = mgmt_http_request(&request).await
+        .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Scrape failed: {:?}", e) })?;
+    let bal_after = ic_cdk::api::canister_cycle_balance();
+    bump_metric(|m| m.total_cycles_spent += bal_before.saturating_sub(bal_after) as u64);
+
+    String::from_utf8(response.body)
+        .map_err(|_| "Error decoding scraped content".into())
+}
+
+fn store_web_entry(url: &str, content: &str) {
+    let idx = WEB_COUNTER.with(|c| {
+        let mut cell = c.borrow_mut();
+        let count = cell.get().clone();
+        let _ = cell.set(count + 1);
+        (count % 12) as u8
+    });
+    let summary: String = content.chars().take(300).collect();
+    let entry = WebEntry {
+        url: url.to_string(),
+        summary,
+        timestamp: ic_cdk::api::time(),
+    };
+    WEB_MEM.with(|m| m.borrow_mut().insert(idx, entry));
+}
+
 /// Build the ultra-compressed messages array.  Exactly 2-3 JSON messages:
 ///   1. system prompt + structured PicoState (I:/T:/E:/P: tiers)
 ///   2. last assistant reply, truncated (for reference continuity) — optional
@@ -637,6 +721,33 @@ fn build_messages_json(config: &AgentConfig, prompt: &str) -> String {
             json.push_str(&json_escape(&state.priors));
         }
     }
+
+    // ── [W] web memory summaries ──
+    let web_entries: Vec<WebEntry> = WEB_MEM.with(|m| {
+        let map = m.borrow();
+        let mut entries: Vec<WebEntry> = (0u8..12).filter_map(|i| map.get(&i)).collect();
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries
+    });
+    if !web_entries.is_empty() {
+        json.push_str("\\n\\n[W] Recent lookups:\\n");
+        let now = ic_cdk::api::time();
+        for (i, entry) in web_entries.iter().enumerate() {
+            let ago_secs = (now.saturating_sub(entry.timestamp)) / 1_000_000_000;
+            let ago = if ago_secs < 60 { format!("{}s ago", ago_secs) }
+                else if ago_secs < 3600 { format!("{}m ago", ago_secs / 60) }
+                else { format!("{}h ago", ago_secs / 3600) };
+            let preview: String = entry.summary.chars().take(100).collect();
+            json.push_str(&format!("{}. ", i + 1));
+            json.push_str(&json_escape(&entry.url));
+            json.push_str(" (");
+            json.push_str(&ago);
+            json.push_str("): ");
+            json.push_str(&json_escape(&preview));
+            json.push_str("\\n");
+        }
+    }
+
     json.push_str("\"}");
 
     // ── message 2 (optional): last assistant reply, truncated for continuity ──
@@ -895,7 +1006,23 @@ async fn chat(prompt: String) -> Result<String, String> {
 
     log_message("user", &prompt);
 
-    let body = build_request_body(&config, &prompt);
+    // Detect URL → scrape via Jina Reader → augment prompt
+    let mut augmented_prompt = prompt.clone();
+    if let Some(url) = extract_url(&prompt) {
+        let url_owned = url.to_string();
+        match pico_scrape(&url_owned).await {
+            Ok(content) => {
+                store_web_entry(&url_owned, &content);
+                let truncated: String = content.chars().take(6000).collect();
+                augmented_prompt = format!("{}\n\n[Web: {}]\n{}", prompt, url_owned, truncated);
+            }
+            Err(e) => {
+                augmented_prompt = format!("{}\n\n[Web scrape failed: {}]", prompt, e);
+            }
+        }
+    }
+
+    let body = build_request_body(&config, &augmented_prompt);
 
     // Non-replicated outcall: only 1 subnet node makes the request (no consensus needed)
     let request = HttpRequestArgs {
@@ -1021,6 +1148,39 @@ fn clear_notes() -> Result<(), String> {
     require_controller()?;
     SESSION_NOTES.with(|s| {
         let _ = s.borrow_mut().set(PicoState::default());
+    });
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Web memory endpoints
+// ═══════════════════════════════════════════════════════════════════════
+
+#[ic_cdk::update]
+async fn browse(url: String) -> Result<String, String> {
+    require_authorized()?;
+    let content = pico_scrape(&url).await?;
+    store_web_entry(&url, &content);
+    Ok(content.chars().take(500).collect())
+}
+
+#[ic_cdk::query]
+fn get_web_memory() -> Vec<WebEntry> {
+    require_authorized().unwrap_or_else(|_| ic_cdk::trap("Access denied"));
+    WEB_MEM.with(|m| {
+        let map = m.borrow();
+        let mut entries: Vec<WebEntry> = (0u8..12).filter_map(|i| map.get(&i)).collect();
+        entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        entries
+    })
+}
+
+#[ic_cdk::update]
+fn clear_web_memory() -> Result<(), String> {
+    require_controller()?;
+    WEB_MEM.with(|m| {
+        let mut map = m.borrow_mut();
+        for i in 0u8..12 { let _ = map.remove(&i); }
     });
     Ok(())
 }
