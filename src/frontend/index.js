@@ -263,6 +263,32 @@ async function loadHistory() {
   }
 }
 
+// ── On-chain tools (free queries, skip LLM) ─────────────────────────
+const PRINCIPAL_RE = /^[a-z0-9]{5}(-[a-z0-9]{5}){4,9}-[a-z0-9]{3}$/i;
+
+function extractPrincipal(text) {
+  // Exact match: just a principal
+  const t = text.trim();
+  if (PRINCIPAL_RE.test(t)) return t;
+  // "convert <principal>" or "account id for <principal>" etc.
+  const m = t.match(/([a-z0-9]{5}(?:-[a-z0-9]{5}){4,9}-[a-z0-9]{3})/i);
+  return m ? m[1] : null;
+}
+
+async function handleToolQuery(text) {
+  const principal = extractPrincipal(text);
+  if (principal && actor.principal_to_account_id) {
+    try {
+      const r = await actor.principal_to_account_id(principal);
+      if (r?.Ok) {
+        return 'Account ID for ' + principal + ':\n' + r.Ok;
+      }
+      if (r?.Err) return 'Error: ' + r.Err;
+    } catch (_) {}
+  }
+  return null; // no tool matched — fall through to LLM
+}
+
 // ── Chat (queue-based — button never blocks) ────────────────────────
 function sendMessage() {
   const text = inputEl.value.trim();
@@ -291,17 +317,23 @@ async function drainQueue() {
     typingEl.classList.add('show');
     scroll();
     try {
-      const r = await actor.chat(text);
-      if (stopped) break;
-      if (r?.Ok != null) {
-        appendMsg('assistant', r.Ok);
-      } else if (r?.Err != null) {
-        appendMsg('system', 'Error: ' + r.Err);
+      // Free on-chain tools — skip LLM if matched
+      const toolResult = await handleToolQuery(text);
+      if (toolResult) {
+        appendMsg('assistant', toolResult);
       } else {
-        appendMsg('assistant', String(r ?? ''));
+        const r = await actor.chat(text);
+        if (stopped) break;
+        if (r?.Ok != null) {
+          appendMsg('assistant', r.Ok);
+        } else if (r?.Err != null) {
+          appendMsg('system', 'Error: ' + r.Err);
+        } else {
+          appendMsg('assistant', String(r ?? ''));
+        }
+        refreshMetrics();
+        if (memPanelOpen) setTimeout(refreshMemory, 1500);
       }
-      refreshMetrics();
-      if (memPanelOpen) setTimeout(refreshMemory, 1500);
     } catch (e) {
       if (!stopped) appendMsg('system', 'Call failed: ' + (e?.message || e));
     } finally {

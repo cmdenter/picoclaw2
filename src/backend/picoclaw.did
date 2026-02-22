@@ -92,6 +92,9 @@ service : {
     "clear_web_memory" : () -> (variant { Ok : null; Err : text });
 
 
+    // On-chain tools (free queries)
+    "principal_to_account_id" : (text) -> (variant { Ok : text; Err : text }) query;
+
     // Monitoring
     "get_metrics" : () -> (Metrics) query;
     "cycle_balance" : () -> (nat) query;
