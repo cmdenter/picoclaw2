@@ -25,13 +25,16 @@ let authClient = null;
 let identity = null;
 let principalId = null;
 let authProvider = null;
-let sending = false;
 let memPanelOpen = false;
 let toastTimer = 0;
 
+// ── Message queue (never blocks the send button) ─────────────────────
+const queue = [];
+let processing = false;
+
 // ── Tiny helpers (inlined on hot path) ──────────────────────────────
 function syncSend() {
-  sendBtn.disabled = !inputEl.value.trim() || sending;
+  sendBtn.disabled = !identity;
 }
 
 function scroll() {
@@ -62,7 +65,6 @@ function autoResize(el) {
   const e = el || inputEl;
   e.style.height = 'auto';
   e.style.height = Math.min(e.scrollHeight, 120) + 'px';
-  syncSend();
 }
 
 function handleKey(e) {
@@ -115,8 +117,8 @@ async function loginII() {
   await createAuthenticatedActor();
   updateAuthUI(true);
   toast('II connected: ' + principalId.slice(0, 8) + '...');
+  syncSend();
   checkHealth();
-  loadHistory();
 }
 
 async function loginPlug() {
@@ -137,8 +139,8 @@ async function loginPlug() {
     actor = await window.ic.plug.createActor({ canisterId, interfaceFactory: idlFactory });
     updateAuthUI(true);
     toast('Plug connected: ' + principalId.slice(0, 8) + '...');
+    syncSend();
     checkHealth();
-    loadHistory();
   } catch(e) {
     console.error('Plug login failed:', e);
     toast('Plug connection failed');
@@ -158,7 +160,9 @@ async function logout() {
   const { picoclaw: anonActor } = await import("declarations/picoclaw");
   actor = anonActor;
   updateAuthUI(false);
+  syncSend();
   statusDot.className = 'status-dot';
+  chatArea.innerHTML = '<div class="msg system">Session ended. Connect to start chatting.</div>';
   toast('Disconnected');
 }
 
@@ -222,50 +226,50 @@ async function loadHistory() {
   }
 }
 
-// ── Chat (critical path — bombproof) ────────────────────────────────
-async function sendMessage() {
+// ── Chat (queue-based — button never blocks) ────────────────────────
+function sendMessage() {
   const text = inputEl.value.trim();
-  if (!text || sending) return;
+  if (!text) return;
   if (!identity) return toast('Connect a wallet first');
   if (!actor) return toast('Not connected');
 
-  // Lock immediately
-  sending = true;
-  const saved = text;
   inputEl.value = '';
   inputEl.style.height = 'auto';
-  syncSend();
 
-  // Show user message + typing
-  appendMsg('user', saved);
-  chatArea.appendChild(typingEl);
-  typingEl.classList.add('show');
+  appendMsg('user', text);
   scroll();
 
-  try {
-    const r = await actor.chat(saved);
-    // Candid Result<String,String> → { Ok: text } or { Err: text }
-    if (r?.Ok != null) {
-      appendMsg('assistant', r.Ok);
-    } else if (r?.Err != null) {
-      appendMsg('system', 'Error: ' + r.Err);
-      inputEl.value = saved;
-    } else {
-      // Unknown shape — render whatever came back
-      appendMsg('assistant', String(r ?? ''));
-    }
-    refreshMetrics();
-    if (memPanelOpen) setTimeout(refreshMemory, 1500);
-  } catch (e) {
-    appendMsg('system', 'Call failed: ' + (e?.message || e));
-    inputEl.value = saved;
-  } finally {
-    // GUARANTEED cleanup — sending never gets stuck
-    sending = false;
-    typingEl.classList.remove('show');
-    syncSend();
+  queue.push(text);
+  drainQueue();
+}
+
+async function drainQueue() {
+  if (processing) return;
+  processing = true;
+  while (queue.length) {
+    const text = queue.shift();
+    chatArea.appendChild(typingEl);
+    typingEl.classList.add('show');
     scroll();
+    try {
+      const r = await actor.chat(text);
+      if (r?.Ok != null) {
+        appendMsg('assistant', r.Ok);
+      } else if (r?.Err != null) {
+        appendMsg('system', 'Error: ' + r.Err);
+      } else {
+        appendMsg('assistant', String(r ?? ''));
+      }
+      refreshMetrics();
+      if (memPanelOpen) setTimeout(refreshMemory, 1500);
+    } catch (e) {
+      appendMsg('system', 'Call failed: ' + (e?.message || e));
+    } finally {
+      typingEl.classList.remove('show');
+      scroll();
+    }
   }
+  processing = false;
 }
 
 // ── PicoMem ──────────────────────────────────────────────────────────
@@ -339,13 +343,11 @@ window._pc = {
   toggleMemPanel, refreshMemory, triggerCompress, clearMemory,
 };
 
-inputEl.addEventListener('input', syncSend);
-
 // ── Init ─────────────────────────────────────────────────────────────
 await initAuth();
+syncSend();
 checkHealth();
-if (identity) {
-  loadHistory();
-  refreshMemory();
+if (!identity) {
+  chatArea.innerHTML = '<div class="msg system">Connect a wallet to start chatting.</div>';
 }
 setInterval(refreshMetrics, 30000);
