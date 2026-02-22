@@ -654,7 +654,9 @@ async fn pico_scrape(target_url: &str) -> Result<String, String> {
         body: None,
         max_response_bytes: Some(20_000),
         transform: None,
-        headers: vec![],
+        headers: vec![
+            HttpHeader { name: "Accept".into(), value: "text/plain".into() },
+        ],
         is_replicated: Some(false),
     };
     bump_metric(|m| m.total_calls += 1);
@@ -673,12 +675,16 @@ fn has_tool_call(body: &[u8]) -> bool {
     std::str::from_utf8(body).map(|s| s.contains("\"tool_calls\"")).unwrap_or(false)
 }
 
-/// Try to extract the search query from tool_calls arguments.
-/// Handles string args, raw object args, and various edge cases.
-fn extract_tool_query(body: &[u8]) -> Option<String> {
+/// Extract tool_call ID and search query from the LLM response.
+/// Returns (tool_call_id, query). Handles string and object argument formats.
+fn extract_tool_call(body: &[u8]) -> Option<(String, String)> {
     let s = std::str::from_utf8(body).ok()?;
 
-    // Try parsing "arguments" value (could be string or object)
+    // Extract tool_call id (needed for proper tool result message)
+    let id = extract_json_string_field(s, "\"id\":")
+        .unwrap_or_else(|| "call_0".to_string());
+
+    // Extract arguments (could be string or object)
     let args_needle = "\"arguments\":";
     let args_pos = s.find(args_needle)? + args_needle.len();
     let rest = s[args_pos..].trim_start();
@@ -707,24 +713,28 @@ fn extract_tool_query(body: &[u8]) -> Option<String> {
         rest[..=end].to_string()
     };
 
-    // Try "query":"<value>"
-    let qneedle = "\"query\":\"";
-    if let Some(qstart) = args_str.find(qneedle) {
-        let after = &args_str[qstart + qneedle.len()..];
-        let qend = after.find('"').unwrap_or(after.len());
-        let q = &after[..qend];
-        if !q.is_empty() { return Some(q.to_string()); }
-    }
-    // Try "query": "<value>" (with space)
-    let qneedle2 = "\"query\": \"";
-    if let Some(qstart) = args_str.find(qneedle2) {
-        let after = &args_str[qstart + qneedle2.len()..];
-        let qend = after.find('"').unwrap_or(after.len());
-        let q = &after[..qend];
-        if !q.is_empty() { return Some(q.to_string()); }
+    // Try "query":"<value>" and "query": "<value>"
+    for needle in &["\"query\":\"", "\"query\": \""] {
+        if let Some(qstart) = args_str.find(needle) {
+            let after = &args_str[qstart + needle.len()..];
+            let qend = after.find('"').unwrap_or(after.len());
+            let q = &after[..qend];
+            if !q.is_empty() { return Some((id, q.to_string())); }
+        }
     }
     None
 }
+
+/// Extract a simple "key":"value" string field from JSON.
+fn extract_json_string_field(s: &str, needle: &str) -> Option<String> {
+    let pos = s.find(needle)? + needle.len();
+    let rest = s[pos..].trim_start();
+    if !rest.starts_with('"') { return None; }
+    let inner = &rest[1..];
+    let end = inner.find('"')?;
+    Some(inner[..end].to_string())
+}
+
 
 async fn pico_search(query: &str) -> Result<String, String> {
     let encoded: String = query.chars().map(|c| {
@@ -736,7 +746,11 @@ async fn pico_search(query: &str) -> Result<String, String> {
             format!("%{:02X}", c as u32)
         }
     }).collect();
-    let search_url = format!("https://s.jina.ai/{}", encoded);
+    // Google News RSS: free, no auth, returns XML with headlines + sources
+    let search_url = format!(
+        "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en",
+        encoded
+    );
     let request = HttpRequestArgs {
         url: search_url,
         method: HttpMethod::GET,
@@ -753,8 +767,29 @@ async fn pico_search(query: &str) -> Result<String, String> {
     let bal_after = ic_cdk::api::canister_cycle_balance();
     bump_metric(|m| m.total_cycles_spent += bal_before.saturating_sub(bal_after) as u64);
 
-    String::from_utf8(response.body)
-        .map_err(|_| "Error decoding search results".into())
+    let xml = String::from_utf8(response.body)
+        .map_err(|_| String::from("Error decoding search results"))?;
+    // Extract <title>...</title> entries from RSS (skip first 2 which are feed titles)
+    let mut results = String::with_capacity(2000);
+    let mut count = 0u8;
+    let mut pos = 0usize;
+    while let Some(start) = xml[pos..].find("<title>") {
+        let abs_start = pos + start + 7;
+        if let Some(end) = xml[abs_start..].find("</title>") {
+            let title = &xml[abs_start..abs_start + end];
+            pos = abs_start + end + 8;
+            count += 1;
+            if count <= 2 { continue; } // skip feed-level titles
+            if count > 12 { break; } // cap at 10 results
+            results.push_str(&format!("{}. {}\n", count - 2, title));
+        } else {
+            break;
+        }
+    }
+    if results.is_empty() {
+        results.push_str("No results found.");
+    }
+    Ok(results)
 }
 
 fn store_web_entry(url: &str, content: &str) {
@@ -878,6 +913,15 @@ fn build_messages_json(config: &AgentConfig, prompt: &str) -> String {
 const TOOLS_JSON: &str = r#","tools":[{"type":"function","function":{"name":"web_search","description":"Search the web for current information: news, prices, weather, sports, facts, or anything you need real-time data for. Always use this instead of saying you cannot browse.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}}}]"#;
 
 fn build_request_body(config: &AgentConfig, prompt: &str) -> Vec<u8> {
+    build_request_body_inner(config, prompt, true)
+}
+
+fn build_request_body_no_tools(config: &AgentConfig, prompt: &str) -> Vec<u8> {
+    build_request_body_inner(config, prompt, false)
+}
+
+
+fn build_request_body_inner(config: &AgentConfig, prompt: &str, with_tools: bool) -> Vec<u8> {
     let messages = build_messages_json(config, prompt);
     let mut body = String::with_capacity(messages.len() + 512);
     body.push_str("{\"model\":\"");
@@ -885,7 +929,7 @@ fn build_request_body(config: &AgentConfig, prompt: &str) -> Vec<u8> {
     body.push_str("\",\"messages\":");
     body.push_str(&messages);
     body.push_str(",\"temperature\":0.7,\"max_tokens\":2048");
-    body.push_str(TOOLS_JSON);
+    if with_tools { body.push_str(TOOLS_JSON); }
     body.push('}');
     body.into_bytes()
 }
@@ -1153,28 +1197,29 @@ async fn chat(prompt: String) -> Result<String, String> {
         return Err(format!("API error ({}): {}", status_code, body_str));
     }
 
-    // Check for function calling tool_calls FIRST, then fall back to content
+    // ── Tool loop: detect tool_calls → execute → re-call with result ──
     let reply;
-    // Try parsing tool call query; if tool_calls present but parse fails, use user's prompt
-    let tool_query = if has_tool_call(&response.body) {
-        Some(extract_tool_query(&response.body).unwrap_or_else(|| prompt.clone()))
-    } else {
-        None
-    };
+    if has_tool_call(&response.body) {
+        // Extract search query from tool call; fallback = user's original prompt
+        let query = extract_tool_call(&response.body)
+            .map(|(_, q)| q)
+            .unwrap_or_else(|| prompt.clone());
 
-    if let Some(query) = tool_query {
-        // AI decided to search — execute and re-call LLM with results
-        let search_result = match pico_search(&query).await {
+        // Execute search
+        let tool_result = match pico_search(&query).await {
             Ok(results) => {
                 let label: String = query.chars().take(60).collect();
                 store_web_entry(&format!("search: {}", label), &results);
-                let truncated: String = results.chars().take(6000).collect();
-                format!("[Search: {}]\n{}", query, truncated)
+                results.chars().take(6000).collect::<String>()
             }
-            Err(e) => format!("[Search failed: {}]", e),
+            Err(e) => format!("Search failed: {}", e),
         };
-        let search_prompt = format!("{}\n\n{}", prompt, search_result);
-        let body2 = build_request_body(&config, &search_prompt);
+
+        // Re-call LLM with search results injected into user prompt (no tools).
+        // Note: proper tool_calls→tool message flow fails on Chutes/DeepSeek,
+        // so we use the simpler approach of augmenting the user message.
+        let search_prompt = format!("{}\n\n[Search results for: {}]\n{}", augmented_prompt, query, tool_result);
+        let body2 = build_request_body_no_tools(&config, &search_prompt);
         let req2 = HttpRequestArgs {
             url: config.api_endpoint.clone(),
             max_response_bytes: Some(config.max_response_bytes),
@@ -1194,7 +1239,7 @@ async fn chat(prompt: String) -> Result<String, String> {
         let b3 = ic_cdk::api::canister_cycle_balance();
         bump_metric(|m| m.total_cycles_spent += b2.saturating_sub(b3) as u64);
         reply = extract_content(&resp2.body)
-            .unwrap_or_else(|| "Search completed but failed to parse response".into());
+            .unwrap_or_else(|| "Search completed but could not parse follow-up".into());
     } else {
         reply = extract_content(&response.body).ok_or_else(|| {
             bump_metric(|m| m.errors += 1);
