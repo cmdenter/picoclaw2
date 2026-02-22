@@ -187,26 +187,31 @@ async function sendMessage() {
   try {
     const result = await actor.chat(text);
     showTyping(false);
-    if ('Ok' in result) {
+    if (result && typeof result === 'object' && 'Ok' in result) {
       addMessage('assistant', result.Ok);
-    } else {
+    } else if (result && typeof result === 'object' && 'Err' in result) {
       addMessage('system', 'Error: ' + result.Err);
       failed = true;
+    } else {
+      // Unexpected format — show raw
+      addMessage('assistant', String(result));
     }
     refreshMetrics();
     if (memPanelOpen) setTimeout(refreshMemory, 1500);
   } catch (e) {
     showTyping(false);
-    addMessage('system', 'Call failed: ' + e.message);
+    addMessage('system', 'Call failed: ' + (e.message || String(e)));
     failed = true;
+  } finally {
+    sending = false;
+    showTyping(false);
+    if (failed) {
+      input.value = text;
+      autoResize(input);
+    }
+    scrollBottom();
+    updateSendBtn();
   }
-  if (failed) {
-    input.value = text;
-    autoResize(input);
-  }
-  sending = false;
-  scrollBottom();
-  updateSendBtn();
 }
 
 // ── UI helpers ───────────────────────────────────────────────────────
