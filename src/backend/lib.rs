@@ -672,32 +672,44 @@ async fn pico_scrape(target_url: &str) -> Result<String, String> {
 }
 
 /// Parse OpenAI function-calling tool_calls from raw JSON response.
-/// Extracts the "query" argument from a web_search tool call.
+/// Handles both string args `"arguments":"{\"query\":\"...\"}"` and
+/// raw object args `"arguments":{"query":"..."}`.
 fn extract_tool_query(body: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(body).ok()?;
     if !s.contains("\"tool_calls\"") { return None; }
-    let needle = "\"arguments\":\"";
-    let start = s.find(needle)? + needle.len();
-    let rest = &s[start..];
-    // Unescape the JSON string value
-    let mut args = String::new();
-    let mut chars = rest.chars();
-    loop {
-        match chars.next()? {
-            '"' => break,
-            '\\' => match chars.next()? {
-                '"' => args.push('"'),
-                '\\' => args.push('\\'),
-                'n' => args.push('\n'),
-                c => { args.push('\\'); args.push(c); }
-            },
-            c => args.push(c),
+
+    // Find "arguments": and check what follows
+    let args_needle = "\"arguments\":";
+    let args_pos = s.find(args_needle)? + args_needle.len();
+    let rest = s[args_pos..].trim_start();
+
+    let args_str = if rest.starts_with('"') {
+        // String format: "{\"query\":\"...\"}" — unescape
+        let inner = &rest[1..];
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        loop {
+            match chars.next()? {
+                '"' => break,
+                '\\' => match chars.next()? {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    'n' => out.push('\n'),
+                    c => { out.push('\\'); out.push(c); }
+                },
+                c => out.push(c),
+            }
         }
-    }
-    // args = {"query":"latest news"} — extract the query value
+        out
+    } else {
+        // Raw object format: {"query":"..."} — use as-is
+        rest.to_string()
+    };
+
+    // Extract "query":"<value>" from the args
     let qneedle = "\"query\":\"";
-    let qstart = args.find(qneedle)? + qneedle.len();
-    let qrest = &args[qstart..];
+    let qstart = args_str.find(qneedle)? + qneedle.len();
+    let qrest = &args_str[qstart..];
     let qend = qrest.find('"').unwrap_or(qrest.len());
     let query = &qrest[..qend];
     if query.is_empty() { None } else { Some(query.to_string()) }
@@ -1166,11 +1178,19 @@ async fn chat(prompt: String) -> Result<String, String> {
         reply = extract_content(&resp2.body)
             .unwrap_or_else(|| "Search completed but failed to parse response".into());
     } else {
-        reply = extract_content(&response.body)
-            .ok_or_else(|| {
-                bump_metric(|m| m.errors += 1);
-                "Failed to parse LLM response".to_string()
-            })?;
+        let content = extract_content(&response.body);
+        let resp_str = std::str::from_utf8(&response.body).unwrap_or("");
+        if content.is_none() && resp_str.contains("\"tool_calls\"") {
+            // Tool call detected but query parsing failed — log for debugging
+            bump_metric(|m| m.errors += 1);
+            let snippet: String = resp_str.chars().take(500).collect();
+            return Err(format!("Tool call parse error. Response: {}", snippet));
+        }
+        reply = content.ok_or_else(|| {
+            bump_metric(|m| m.errors += 1);
+            let snippet: String = resp_str.chars().take(300).collect();
+            format!("Failed to parse LLM response: {}", snippet)
+        })?;
     }
 
     if reply.is_empty() {
