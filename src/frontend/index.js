@@ -1,7 +1,6 @@
 import { picoclaw } from "declarations/picoclaw";
 import { AuthClient } from "@dfinity/auth-client";
 import { HttpAgent, Actor } from "@dfinity/agent";
-import { Principal } from "@dfinity/principal";
 
 // ── Cached DOM (single lookup at init, never re-queried) ────────────
 const chatArea  = document.getElementById('chatArea');
@@ -453,42 +452,9 @@ function closeSettings() {
   settingsModal.classList.remove('show');
 }
 
-async function loadUserNFTs() {
-  nftGrid.innerHTML = '<div class="nft-loading">Loading NFTs...</div>';
-  try {
-    const { getAllUserNFTs } = await import('@psychedelic/dab-js');
-    const agent = window.ic.plug.agent;
-    const principal = Principal.fromText(principalId);
-    const collections = await getAllUserNFTs({ user: principal, agent });
-    const allNfts = [];
-    for (const collection of collections) {
-      if (collection.tokens) {
-        for (const token of collection.tokens) {
-          const url = token.url || token.thumbnail || '';
-          if (url) {
-            allNfts.push({ url, name: token.name || collection.name || 'NFT', collection: collection.name || '' });
-          }
-        }
-      }
-    }
-    if (allNfts.length === 0) {
-      nftGrid.innerHTML = '<div class="nft-empty">No NFTs found in your wallet</div>';
-      return;
-    }
-    nftGrid.innerHTML = '';
-    for (const nft of allNfts) {
-      const img = document.createElement('img');
-      img.src = nft.url;
-      img.alt = nft.name;
-      img.title = nft.name + (nft.collection ? ' (' + nft.collection + ')' : '');
-      if (nft.url === selectedNftUrl) img.classList.add('selected');
-      img.onclick = () => selectNft(nft.url);
-      nftGrid.appendChild(img);
-    }
-  } catch (e) {
-    console.warn('NFT load failed:', e);
-    nftGrid.innerHTML = '<div class="nft-empty">Failed to load NFTs. You can paste an image URL below.</div>';
-  }
+function loadUserNFTs() {
+  // dab-js no longer on npm — show paste-URL guidance for Plug users
+  nftGrid.innerHTML = '<div class="nft-empty">Paste your NFT image URL below (copy from Entrepot, Bioniq, or your collection page)</div>';
 }
 
 function selectNft(url) {
