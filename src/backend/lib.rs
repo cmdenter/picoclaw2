@@ -150,7 +150,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             persona: "PicoClaw".into(),
-            system_prompt: "You are PicoClaw, an autonomous AI agent running fully on-chain on the Internet Computer. Be concise, precise, and helpful. You CAN browse the web: when a user includes a URL, the page content appears below their message as [Web: url]. Use that content to answer. You can also reference pages from [W] web memory.".into(),
+            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful.\nTool: [SEARCH: query] — output this tag to search the web. You will receive results and answer with them. Use for current events, news, prices, weather, scores, or any factual query you lack info on. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W]. Never say you cannot browse.".into(),
             allowed_tools: vec![],
             api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
             model: "deepseek-ai/DeepSeek-V3".into(),
@@ -668,6 +668,45 @@ async fn pico_scrape(target_url: &str) -> Result<String, String> {
         .map_err(|_| "Error decoding scraped content".into())
 }
 
+fn extract_search_tag(reply: &str) -> Option<String> {
+    let start = reply.find("[SEARCH:")?;
+    let rest = &reply[start + 8..];
+    let end = rest.find(']')?;
+    let query = rest[..end].trim();
+    if query.is_empty() { None } else { Some(query.to_string()) }
+}
+
+async fn pico_search(query: &str) -> Result<String, String> {
+    let encoded: String = query.chars().map(|c| {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+            c.to_string()
+        } else if c == ' ' {
+            "+".to_string()
+        } else {
+            format!("%{:02X}", c as u32)
+        }
+    }).collect();
+    let search_url = format!("https://s.jina.ai/{}", encoded);
+    let request = HttpRequestArgs {
+        url: search_url,
+        method: HttpMethod::GET,
+        body: None,
+        max_response_bytes: Some(20_000),
+        transform: None,
+        headers: vec![],
+        is_replicated: Some(false),
+    };
+    bump_metric(|m| m.total_calls += 1);
+    let bal_before = ic_cdk::api::canister_cycle_balance();
+    let response = mgmt_http_request(&request).await
+        .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Search failed: {:?}", e) })?;
+    let bal_after = ic_cdk::api::canister_cycle_balance();
+    bump_metric(|m| m.total_cycles_spent += bal_before.saturating_sub(bal_after) as u64);
+
+    String::from_utf8(response.body)
+        .map_err(|_| "Error decoding search results".into())
+}
+
 fn store_web_entry(url: &str, content: &str) {
     let idx = WEB_COUNTER.with(|c| {
         let mut cell = c.borrow_mut();
@@ -1006,7 +1045,7 @@ async fn chat(prompt: String) -> Result<String, String> {
 
     log_message("user", &prompt);
 
-    // Detect URL → scrape via Jina Reader → augment prompt
+    // If user included a URL, scrape it and augment the prompt
     let mut augmented_prompt = prompt.clone();
     if let Some(url) = extract_url(&prompt) {
         let url_owned = url.to_string();
@@ -1060,7 +1099,7 @@ async fn chat(prompt: String) -> Result<String, String> {
         return Err(format!("API error ({}): {}", status_code, body_str));
     }
 
-    let reply = extract_content(&response.body)
+    let mut reply = extract_content(&response.body)
         .ok_or_else(|| {
             bump_metric(|m| m.errors += 1);
             "Failed to parse LLM response".to_string()
@@ -1069,6 +1108,41 @@ async fn chat(prompt: String) -> Result<String, String> {
     if reply.is_empty() {
         bump_metric(|m| m.errors += 1);
         return Err("Empty response from LLM".into());
+    }
+
+    // Tool use: if AI outputs [SEARCH: query], execute and re-call once
+    if let Some(query) = extract_search_tag(&reply) {
+        match pico_search(&query).await {
+            Ok(results) => {
+                let label: String = query.chars().take(60).collect();
+                store_web_entry(&format!("search: {}", label), &results);
+                let truncated: String = results.chars().take(6000).collect();
+                let search_prompt = format!("{}\n\n[Search: {}]\n{}", prompt, query, truncated);
+                let body2 = build_request_body(&config, &search_prompt);
+                let req2 = HttpRequestArgs {
+                    url: config.api_endpoint.clone(),
+                    max_response_bytes: Some(config.max_response_bytes),
+                    method: HttpMethod::POST,
+                    headers: vec![
+                        HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
+                        HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
+                    ],
+                    body: Some(body2),
+                    transform: None,
+                    is_replicated: Some(false),
+                };
+                bump_metric(|m| m.total_calls += 1);
+                let b2 = ic_cdk::api::canister_cycle_balance();
+                if let Ok(resp2) = mgmt_http_request(&req2).await {
+                    let b3 = ic_cdk::api::canister_cycle_balance();
+                    bump_metric(|m| m.total_cycles_spent += b2.saturating_sub(b3) as u64);
+                    if let Some(r2) = extract_content(&resp2.body) {
+                        if !r2.is_empty() { reply = r2; }
+                    }
+                }
+            }
+            Err(_) => {} // search failed, return original reply
+        }
     }
 
     log_message("assistant", &reply);
