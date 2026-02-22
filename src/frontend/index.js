@@ -2,14 +2,72 @@ import { picoclaw } from "declarations/picoclaw";
 import { AuthClient } from "@dfinity/auth-client";
 import { HttpAgent, Actor } from "@dfinity/agent";
 
+// ── Cached DOM (single lookup at init, never re-queried) ────────────
+const chatArea  = document.getElementById('chatArea');
+const inputEl   = document.getElementById('input');
+const sendBtn   = document.getElementById('sendBtn');
+const typingEl  = document.getElementById('typing');
+const statusDot = document.getElementById('statusDot');
+const authBar   = document.getElementById('authBar');
+const toastEl   = document.getElementById('toast');
+const statMsgs  = document.getElementById('statMsgs');
+const statCalls = document.getElementById('statCalls');
+const statCycles= document.getElementById('statCycles');
+const statQueue = document.getElementById('statQueue');
+const memPanel  = document.getElementById('memPanel');
+const memToggle = document.getElementById('memToggleBtn');
+const memStatus = document.getElementById('memStatus');
+const memTs     = document.getElementById('memTs');
+
 // ── State ────────────────────────────────────────────────────────────
-let actor = picoclaw; // Auto-connected via declarations
+let actor = picoclaw;
 let authClient = null;
 let identity = null;
 let principalId = null;
 let authProvider = null;
 let sending = false;
 let memPanelOpen = false;
+let toastTimer = 0;
+
+// ── Tiny helpers (inlined on hot path) ──────────────────────────────
+function syncSend() {
+  sendBtn.disabled = !inputEl.value.trim() || sending;
+}
+
+function scroll() {
+  chatArea.scrollTop = chatArea.scrollHeight;
+}
+
+function appendMsg(role, text, ts) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  d.textContent = text || '';
+  if (ts) {
+    const s = document.createElement('span');
+    s.className = 'ts';
+    s.textContent = new Date(Number(ts) / 1e6).toLocaleTimeString();
+    d.appendChild(s);
+  }
+  chatArea.appendChild(d);
+}
+
+function toast(msg) {
+  clearTimeout(toastTimer);
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2500);
+}
+
+function autoResize(el) {
+  const e = el || inputEl;
+  e.style.height = 'auto';
+  e.style.height = Math.min(e.scrollHeight, 120) + 'px';
+  syncSend();
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
 
 // ── Auth ─────────────────────────────────────────────────────────────
 async function initAuth() {
@@ -97,23 +155,21 @@ async function logout() {
   identity = null;
   principalId = null;
   authProvider = null;
-  // Reset to anonymous actor
   const { picoclaw: anonActor } = await import("declarations/picoclaw");
   actor = anonActor;
   updateAuthUI(false);
-  document.getElementById('statusDot').className = 'status-dot';
+  statusDot.className = 'status-dot';
   toast('Disconnected');
 }
 
 function updateAuthUI(authenticated) {
-  const bar = document.getElementById('authBar');
   if (authenticated && principalId) {
     const short = principalId.slice(0, 5) + '...' + principalId.slice(-3);
     const label = authProvider === 'plug' ? 'Plug' : 'II';
-    bar.innerHTML = `<span class="principal-tag" title="${principalId}">${label}: ${short}</span><button class="auth-btn logout" onclick="window._pc.toggleAuthDropdown()">Disconnect</button>
+    authBar.innerHTML = `<span class="principal-tag" title="${principalId}">${label}: ${short}</span><button class="auth-btn logout" onclick="window._pc.toggleAuthDropdown()">Disconnect</button>
       <div class="auth-dropdown" id="authDropdown"></div>`;
   } else {
-    bar.innerHTML = `<button class="auth-btn" onclick="window._pc.toggleAuthDropdown()">Connect</button>
+    authBar.innerHTML = `<button class="auth-btn" onclick="window._pc.toggleAuthDropdown()">Connect</button>
       <div class="auth-dropdown" id="authDropdown">
         <button onclick="window._pc.loginII()">Internet Identity</button>
         <button onclick="window._pc.loginPlug()">Plug Wallet</button>
@@ -121,16 +177,15 @@ function updateAuthUI(authenticated) {
   }
 }
 
-// ── Health ────────────────────────────────────────────────────────────
+// ── Health / Metrics ─────────────────────────────────────────────────
 async function checkHealth() {
-  const dot = document.getElementById('statusDot');
   try {
-    if (!actor) throw new Error('No actor');
+    if (!actor) throw 0;
     await actor.cycle_balance();
-    dot.className = 'status-dot ok';
+    statusDot.className = 'status-dot ok';
     refreshMetrics();
   } catch {
-    dot.className = 'status-dot err';
+    statusDot.className = 'status-dot err';
   }
 }
 
@@ -142,11 +197,10 @@ async function refreshMetrics() {
       actor.cycle_balance(),
       actor.get_queue_length(),
     ]);
-    document.getElementById('statMsgs').textContent = m.total_messages.toString();
-    document.getElementById('statCalls').textContent = m.total_calls.toString();
-    document.getElementById('statQueue').textContent = q.toString();
-    const t = Number(bal) / 1e12;
-    document.getElementById('statCycles').textContent = t.toFixed(2) + 'T';
+    statMsgs.textContent = m.total_messages.toString();
+    statCalls.textContent = m.total_calls.toString();
+    statQueue.textContent = q.toString();
+    statCycles.textContent = (Number(bal) / 1e12).toFixed(2) + 'T';
   } catch {}
 }
 
@@ -155,202 +209,137 @@ async function loadHistory() {
   if (!actor) return;
   try {
     const msgs = await actor.get_history(BigInt(200));
-    const area = document.getElementById('chatArea');
-    area.innerHTML = '';
-    if (msgs.length === 0) {
-      area.innerHTML = '<div class="msg system">No messages yet. Start chatting!</div>';
+    chatArea.innerHTML = '';
+    if (!msgs.length) {
+      chatArea.innerHTML = '<div class="msg system">No messages yet. Start chatting!</div>';
     }
-    msgs.forEach(m => addMessage(m.role, m.content, m.timestamp));
-    scrollBottom();
+    for (let i = 0; i < msgs.length; i++) {
+      appendMsg(msgs[i].role, msgs[i].content, msgs[i].timestamp);
+    }
+    scroll();
   } catch (e) {
-    toast('Failed: ' + e.message);
+    toast('History failed: ' + (e?.message || e));
   }
 }
 
-// ── Chat ─────────────────────────────────────────────────────────────
+// ── Chat (critical path — bombproof) ────────────────────────────────
 async function sendMessage() {
-  const input = document.getElementById('input');
-  const text = input.value.trim();
+  const text = inputEl.value.trim();
   if (!text || sending) return;
-  if (!identity) { toast('Connect a wallet first'); return; }
-  if (!actor) { toast('Not connected'); return; }
+  if (!identity) return toast('Connect a wallet first');
+  if (!actor) return toast('Not connected');
 
+  // Lock immediately
   sending = true;
-  input.value = '';
-  autoResize(input);
-  updateSendBtn();
-  addMessage('user', text);
-  scrollBottom();
-  showTyping(true);
+  const saved = text;
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+  syncSend();
 
-  let failed = false;
+  // Show user message + typing
+  appendMsg('user', saved);
+  chatArea.appendChild(typingEl);
+  typingEl.classList.add('show');
+  scroll();
+
   try {
-    const result = await actor.chat(text);
-    showTyping(false);
-    if (result && typeof result === 'object' && 'Ok' in result) {
-      addMessage('assistant', result.Ok);
-    } else if (result && typeof result === 'object' && 'Err' in result) {
-      addMessage('system', 'Error: ' + result.Err);
-      failed = true;
+    const r = await actor.chat(saved);
+    // Candid Result<String,String> → { Ok: text } or { Err: text }
+    if (r?.Ok != null) {
+      appendMsg('assistant', r.Ok);
+    } else if (r?.Err != null) {
+      appendMsg('system', 'Error: ' + r.Err);
+      inputEl.value = saved;
     } else {
-      // Unexpected format — show raw
-      addMessage('assistant', String(result));
+      // Unknown shape — render whatever came back
+      appendMsg('assistant', String(r ?? ''));
     }
     refreshMetrics();
     if (memPanelOpen) setTimeout(refreshMemory, 1500);
   } catch (e) {
-    showTyping(false);
-    addMessage('system', 'Call failed: ' + (e.message || String(e)));
-    failed = true;
+    appendMsg('system', 'Call failed: ' + (e?.message || e));
+    inputEl.value = saved;
   } finally {
+    // GUARANTEED cleanup — sending never gets stuck
     sending = false;
-    showTyping(false);
-    if (failed) {
-      input.value = text;
-      autoResize(input);
-    }
-    scrollBottom();
-    updateSendBtn();
+    typingEl.classList.remove('show');
+    syncSend();
+    scroll();
   }
-}
-
-// ── UI helpers ───────────────────────────────────────────────────────
-function addMessage(role, content, timestamp) {
-  const area = document.getElementById('chatArea');
-  const div = document.createElement('div');
-  div.className = `msg ${role}`;
-  div.textContent = content;
-  if (timestamp) {
-    const ts = document.createElement('span');
-    ts.className = 'ts';
-    const d = new Date(Number(timestamp) / 1e6);
-    ts.textContent = d.toLocaleTimeString();
-    div.appendChild(ts);
-  }
-  area.appendChild(div);
-}
-
-function scrollBottom() {
-  const area = document.getElementById('chatArea');
-  requestAnimationFrame(() => area.scrollTop = area.scrollHeight);
-}
-
-function showTyping(show) {
-  const el = document.getElementById('typing');
-  const area = document.getElementById('chatArea');
-  if (show) { area.appendChild(el); el.classList.add('show'); }
-  else { el.classList.remove('show'); }
-  scrollBottom();
-}
-
-function autoResize(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-  updateSendBtn();
-}
-
-function updateSendBtn() {
-  document.getElementById('sendBtn').disabled = !document.getElementById('input').value.trim() || sending;
-}
-
-function handleKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-}
-
-function toast(msg) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 2500);
 }
 
 // ── PicoMem ──────────────────────────────────────────────────────────
 function toggleMemPanel() {
   memPanelOpen = !memPanelOpen;
-  document.getElementById('memPanel').classList.toggle('show', memPanelOpen);
-  document.getElementById('memToggleBtn').classList.toggle('active', memPanelOpen);
+  memPanel.classList.toggle('show', memPanelOpen);
+  memToggle.classList.toggle('active', memPanelOpen);
   if (memPanelOpen && actor) refreshMemory();
 }
 
-function renderTier(elId, sizeElId, text, maxChars) {
+function renderTier(elId, sizeId, text, max) {
   const body = document.getElementById(elId);
-  const size = document.getElementById(sizeElId);
-  if (text && text.length > 0) {
-    body.textContent = text;
-    body.className = 'tier-body';
-  } else {
-    body.textContent = 'empty';
-    body.className = 'tier-body empty';
-  }
-  size.textContent = (text ? text.length : 0) + '/' + maxChars;
+  const size = document.getElementById(sizeId);
+  const len = text ? text.length : 0;
+  body.textContent = len ? text : 'empty';
+  body.className = len ? 'tier-body' : 'tier-body empty';
+  size.textContent = len + '/' + max;
 }
 
 async function refreshMemory() {
   if (!actor) return;
   try {
-    const state = await actor.get_notes();
-    renderTier('tierI', 'tierISize', state.identity, 256);
-    renderTier('tierT', 'tierTSize', state.thread, 600);
-    renderTier('tierE', 'tierESize', state.episodes, 900);
-    renderTier('tierP', 'tierPSize', state.priors, 128);
-    const ts = document.getElementById('memTs');
-    if (state.updated_at > 0n) {
-      const d = new Date(Number(state.updated_at) / 1e6);
-      ts.textContent = 'updated ' + d.toLocaleTimeString();
+    const s = await actor.get_notes();
+    renderTier('tierI', 'tierISize', s.identity, 256);
+    renderTier('tierT', 'tierTSize', s.thread, 600);
+    renderTier('tierE', 'tierESize', s.episodes, 900);
+    renderTier('tierP', 'tierPSize', s.priors, 128);
+    if (s.updated_at > 0n) {
+      memTs.textContent = 'updated ' + new Date(Number(s.updated_at) / 1e6).toLocaleTimeString();
     } else {
-      ts.textContent = 'never compressed';
+      memTs.textContent = 'never compressed';
     }
-    const filled = [state.identity, state.thread, state.episodes, state.priors].filter(s => s.length > 0).length;
-    document.getElementById('memStatus').textContent = filled + '/4 tiers';
+    memStatus.textContent = [s.identity, s.thread, s.episodes, s.priors].filter(x => x.length).length + '/4 tiers';
   } catch (e) {
-    toast('Memory fetch failed: ' + e.message);
+    toast('Memory fetch failed: ' + (e?.message || e));
   }
 }
 
 async function triggerCompress() {
-  if (!actor || !identity) { toast('Login first'); return; }
+  if (!actor || !identity) return toast('Login first');
   const btn = document.getElementById('compressBtn');
   btn.disabled = true;
   btn.textContent = 'Compressing...';
   try {
-    const result = await actor.compress_context();
-    if ('Ok' in result) {
-      toast('Compression complete');
-      await refreshMemory();
-    } else {
-      toast('Compress error: ' + result.Err);
-    }
+    const r = await actor.compress_context();
+    if (r?.Ok != null) { toast('Compression complete'); await refreshMemory(); }
+    else toast('Compress error: ' + (r?.Err || 'unknown'));
   } catch (e) {
-    toast('Compress failed: ' + e.message);
+    toast('Compress failed: ' + (e?.message || e));
   }
   btn.disabled = false;
   btn.textContent = 'Compress Now';
 }
 
 async function clearMemory() {
-  if (!actor || !identity) { toast('Login first'); return; }
+  if (!actor || !identity) return toast('Login first');
   if (!confirm('Clear all PicoMem tiers? This cannot be undone.')) return;
   try {
-    const result = await actor.clear_notes();
-    if ('Ok' in result) {
-      toast('Memory cleared');
-      await refreshMemory();
-    } else {
-      toast('Clear error: ' + result.Err);
-    }
+    const r = await actor.clear_notes();
+    if (r?.Ok != null) { toast('Memory cleared'); await refreshMemory(); }
+    else toast('Clear error: ' + (r?.Err || 'unknown'));
   } catch (e) {
-    toast('Clear failed: ' + e.message);
+    toast('Clear failed: ' + (e?.message || e));
   }
 }
 
-// ── Wire up to window for onclick handlers ───────────────────────────
+// ── Wire up ─────────────────────────────────────────────────────────
 window._pc = {
   sendMessage, loadHistory, handleKey, autoResize,
   toggleAuthDropdown, loginII, loginPlug,
   toggleMemPanel, refreshMemory, triggerCompress, clearMemory,
 };
 
-document.getElementById('input').addEventListener('input', updateSendBtn);
+inputEl.addEventListener('input', syncSend);
 
 // ── Init ─────────────────────────────────────────────────────────────
 await initAuth();
