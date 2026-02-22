@@ -286,6 +286,40 @@ impl Storable for Metrics {
     const BOUND: Bound = Bound::Bounded { max_size: 32, is_fixed_size: true };
 }
 
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct UserProfile {
+    pub name: String,       // max 32 chars — custom PicoClaw name
+    pub avatar_url: String, // max 256 chars — NFT image URL
+    pub updated_at: u64,
+}
+
+impl Default for UserProfile {
+    fn default() -> Self {
+        Self { name: "PicoClaw".into(), avatar_url: String::new(), updated_at: 0 }
+    }
+}
+
+impl Storable for UserProfile {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = Vec::with_capacity(self.name.len() + self.avatar_url.len() + 16);
+        write_str(&mut buf, &self.name);
+        write_str(&mut buf, &self.avatar_url);
+        buf.extend_from_slice(&self.updated_at.to_le_bytes());
+        Cow::Owned(buf)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let d = bytes.as_ref();
+        let mut p = 0;
+        let name = read_str(d, &mut p);
+        let avatar_url = read_str(d, &mut p);
+        let updated_at = read_u64(d, &mut p);
+        Self { name, avatar_url, updated_at }
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 512, is_fixed_size: false };
+}
+
 /// Tiered conversation state — the PicoClaw equivalent of memory.
 /// Fixed-size, RWKV-inspired: each tier has its own decay policy.
 ///   I: Identity — permanent KV facts (never decay)
@@ -454,6 +488,11 @@ thread_local! {
     static WEB_COUNTER: RefCell<Cell<u64, Memory>> = RefCell::new(
         Cell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(6))), 0u64)
             .expect("web counter init")
+    );
+
+    static USER_PROFILE: RefCell<Cell<UserProfile, Memory>> = RefCell::new(
+        Cell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(7))), UserProfile::default())
+            .expect("user profile cell init")
     );
 
     static MSG_COUNTER: RefCell<u64> = RefCell::new(0);
@@ -951,8 +990,15 @@ fn build_messages_json(config: &AgentConfig, prompt: &str) -> String {
 
     // ── message 1: system prompt + tiered PicoState ──
     let state = SESSION_NOTES.with(|s| s.borrow().get().clone());
+    let profile = USER_PROFILE.with(|p| p.borrow().get().clone());
+    // Inject custom name: replace "PicoClaw" in system prompt with user's chosen name
+    let sys_prompt = if profile.name != "PicoClaw" && !profile.name.is_empty() {
+        config.system_prompt.replace("PicoClaw", &profile.name)
+    } else {
+        config.system_prompt.clone()
+    };
     json.push_str("{\"role\":\"system\",\"content\":\"");
-    json.push_str(&json_escape(&config.system_prompt));
+    json.push_str(&json_escape(&sys_prompt));
 
     let has_state = !state.identity.is_empty() || !state.thread.is_empty()
         || !state.episodes.is_empty() || !state.priors.is_empty();
@@ -1225,6 +1271,38 @@ Rules: no articles, no filler, pipe-delimit facts, abbreviate aggressively. ONLY
     Ok(())
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════
+//  User profile endpoints
+// ═══════════════════════════════════════════════════════════════════════
+
+#[ic_cdk::update]
+fn set_profile(name: String, avatar_url: String) -> Result<(), String> {
+    require_authorized()?;
+    if name.len() > 32 {
+        return Err("Name too long (max 32 chars)".into());
+    }
+    if avatar_url.len() > 256 {
+        return Err("Avatar URL too long (max 256 chars)".into());
+    }
+    if !avatar_url.is_empty() && !avatar_url.starts_with("http") {
+        return Err("Avatar URL must start with http".into());
+    }
+    USER_PROFILE.with(|p| {
+        let _ = p.borrow_mut().set(UserProfile {
+            name: if name.is_empty() { "PicoClaw".into() } else { name },
+            avatar_url,
+            updated_at: ic_cdk::api::time(),
+        });
+    });
+    Ok(())
+}
+
+#[ic_cdk::query]
+fn get_profile() -> UserProfile {
+    require_authorized().unwrap_or_else(|_| ic_cdk::trap("Access denied"));
+    USER_PROFILE.with(|p| p.borrow().get().clone())
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Admin endpoints

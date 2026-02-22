@@ -33,6 +33,12 @@ type Metrics = record {
     errors : nat64;
 };
 
+type UserProfile = record {
+    name : text;
+    avatar_url : text;
+    updated_at : nat64;
+};
+
 type WebEntry = record {
     url : text;
     summary : text;
@@ -62,6 +68,10 @@ service : {
     "set_api_key" : (text) -> (variant { Ok : null; Err : text });
     "configure" : (AgentConfig) -> (variant { Ok : null; Err : text });
     "get_config_public" : () -> (AgentConfig) query;
+
+    // Profile
+    "set_profile" : (text, text) -> (variant { Ok : null; Err : text });
+    "get_profile" : () -> (UserProfile) query;
 
     // Chat
     "chat" : (text) -> (variant { Ok : text; Err : text });

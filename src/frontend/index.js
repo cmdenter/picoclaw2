@@ -1,6 +1,7 @@
 import { picoclaw } from "declarations/picoclaw";
 import { AuthClient } from "@dfinity/auth-client";
 import { HttpAgent, Actor } from "@dfinity/agent";
+import { Principal } from "@dfinity/principal";
 
 // ── Cached DOM (single lookup at init, never re-queried) ────────────
 const chatArea  = document.getElementById('chatArea');
@@ -23,6 +24,13 @@ const memStatus = document.getElementById('memStatus');
 const memTs     = document.getElementById('memTs');
 const webMemBody  = document.getElementById('webMemBody');
 const webMemCount = document.getElementById('webMemCount');
+const avatarImg   = document.getElementById('avatarImg');
+const avatarSvg   = document.getElementById('avatarSvg');
+const clawName    = document.getElementById('clawName');
+const settingsModal = document.getElementById('settingsModal');
+const profileNameInput = document.getElementById('profileName');
+const nftGrid     = document.getElementById('nftGrid');
+const customAvatarInput = document.getElementById('customAvatarUrl');
 
 // ── State ────────────────────────────────────────────────────────────
 let actor = picoclaw;
@@ -32,6 +40,7 @@ let principalId = null;
 let authProvider = null;
 let memPanelOpen = false;
 let toastTimer = 0;
+let selectedNftUrl = '';
 
 // ── Message queue (never blocks the send button) ─────────────────────
 const queue = [];
@@ -132,7 +141,7 @@ async function loginII() {
   toast('II connected: ' + principalId.slice(0, 8) + '...');
   syncSend();
   checkHealth();
-
+  loadProfile();
 }
 
 async function loginPlug() {
@@ -155,7 +164,7 @@ async function loginPlug() {
     toast('Plug connected: ' + principalId.slice(0, 8) + '...');
     syncSend();
     checkHealth();
-  
+    loadProfile();
   } catch(e) {
     console.error('Plug login failed:', e);
     toast('Plug connection failed');
@@ -178,6 +187,11 @@ async function logout() {
   syncSend();
   statusDot.className = 'status-dot';
   chatArea.innerHTML = '<div class="msg system">Session ended. Connect to start chatting.</div>';
+  // Reset avatar and name
+  clawName.textContent = 'PicoClaw';
+  avatarImg.style.display = 'none';
+  avatarSvg.style.display = '';
+  selectedNftUrl = '';
   toast('Disconnected');
 }
 
@@ -397,11 +411,132 @@ async function clearMemory() {
   }
 }
 
+// ── Profile / Settings ───────────────────────────────────────────────
+async function loadProfile() {
+  if (!actor || !identity) return;
+  try {
+    const p = await actor.get_profile();
+    if (p.name && p.name !== 'PicoClaw') {
+      clawName.textContent = p.name;
+    } else {
+      clawName.textContent = 'PicoClaw';
+    }
+    if (p.avatar_url) {
+      avatarImg.src = p.avatar_url;
+      avatarImg.style.display = '';
+      avatarSvg.style.display = 'none';
+      selectedNftUrl = p.avatar_url;
+    } else {
+      avatarImg.style.display = 'none';
+      avatarSvg.style.display = '';
+      selectedNftUrl = '';
+    }
+  } catch (e) {
+    console.warn('Profile load:', e.message || e);
+  }
+}
+
+function openSettings() {
+  if (!identity) return toast('Connect a wallet first');
+  settingsModal.classList.add('show');
+  profileNameInput.value = clawName.textContent === 'PicoClaw' ? '' : clawName.textContent;
+  customAvatarInput.value = selectedNftUrl;
+  // Load NFTs if Plug is connected
+  if (authProvider === 'plug' && window.ic?.plug) {
+    loadUserNFTs();
+  } else {
+    nftGrid.innerHTML = '<div class="nft-empty">Connect Plug Wallet to browse NFTs</div>';
+  }
+}
+
+function closeSettings() {
+  settingsModal.classList.remove('show');
+}
+
+async function loadUserNFTs() {
+  nftGrid.innerHTML = '<div class="nft-loading">Loading NFTs...</div>';
+  try {
+    const { getAllUserNFTs } = await import('@psychedelic/dab-js');
+    const agent = window.ic.plug.agent;
+    const principal = Principal.fromText(principalId);
+    const collections = await getAllUserNFTs({ user: principal, agent });
+    const allNfts = [];
+    for (const collection of collections) {
+      if (collection.tokens) {
+        for (const token of collection.tokens) {
+          const url = token.url || token.thumbnail || '';
+          if (url) {
+            allNfts.push({ url, name: token.name || collection.name || 'NFT', collection: collection.name || '' });
+          }
+        }
+      }
+    }
+    if (allNfts.length === 0) {
+      nftGrid.innerHTML = '<div class="nft-empty">No NFTs found in your wallet</div>';
+      return;
+    }
+    nftGrid.innerHTML = '';
+    for (const nft of allNfts) {
+      const img = document.createElement('img');
+      img.src = nft.url;
+      img.alt = nft.name;
+      img.title = nft.name + (nft.collection ? ' (' + nft.collection + ')' : '');
+      if (nft.url === selectedNftUrl) img.classList.add('selected');
+      img.onclick = () => selectNft(nft.url);
+      nftGrid.appendChild(img);
+    }
+  } catch (e) {
+    console.warn('NFT load failed:', e);
+    nftGrid.innerHTML = '<div class="nft-empty">Failed to load NFTs. You can paste an image URL below.</div>';
+  }
+}
+
+function selectNft(url) {
+  selectedNftUrl = url;
+  customAvatarInput.value = url;
+  // Update selected state in grid
+  for (const img of nftGrid.querySelectorAll('img')) {
+    img.classList.toggle('selected', img.src === url);
+  }
+}
+
+async function saveProfile() {
+  if (!actor || !identity) return toast('Not connected');
+  const name = profileNameInput.value.trim() || 'PicoClaw';
+  const url = customAvatarInput.value.trim();
+  try {
+    const r = await actor.set_profile(name, url);
+    if (r?.Err != null) return toast('Error: ' + r.Err);
+    // Update header
+    clawName.textContent = name;
+    if (url) {
+      avatarImg.src = url;
+      avatarImg.style.display = '';
+      avatarSvg.style.display = 'none';
+      selectedNftUrl = url;
+    } else {
+      avatarImg.style.display = 'none';
+      avatarSvg.style.display = '';
+      selectedNftUrl = '';
+    }
+    closeSettings();
+    toast('Profile saved');
+  } catch (e) {
+    toast('Save failed: ' + (e?.message || e));
+  }
+}
+
+// Close settings on backdrop click
+settingsModal.addEventListener('click', (e) => {
+  if (e.target === settingsModal) closeSettings();
+});
+
 // ── Wire up ─────────────────────────────────────────────────────────
 window._pc = {
   sendMessage, loadHistory, handleKey, autoResize, stopQueue,
   toggleAuthDropdown, loginII, loginPlug,
   toggleMemPanel, refreshMemory, triggerCompress, clearMemory,
+  openSettings, closeSettings, saveProfile,
 };
 
 // ── Init ─────────────────────────────────────────────────────────────
@@ -409,8 +544,8 @@ await initAuth();
 syncSend();
 checkHealth();
 if (identity) {
+  loadProfile();
   refreshMemory();
-
 } else {
   chatArea.innerHTML = '<div class="msg system">Connect a wallet to start chatting.</div>';
 }
