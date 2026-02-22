@@ -14,6 +14,9 @@ const statMsgs  = document.getElementById('statMsgs');
 const statCalls = document.getElementById('statCalls');
 const statCycles= document.getElementById('statCycles');
 const statQueue = document.getElementById('statQueue');
+const statSpent = document.getElementById('statSpent');
+const statCost  = document.getElementById('statCost');
+const stopBtn   = document.getElementById('stopBtn');
 const memPanel  = document.getElementById('memPanel');
 const memToggle = document.getElementById('memToggleBtn');
 const memStatus = document.getElementById('memStatus');
@@ -31,6 +34,7 @@ let toastTimer = 0;
 // ── Message queue (never blocks the send button) ─────────────────────
 const queue = [];
 let processing = false;
+let stopped = false;
 
 // ── Tiny helpers (inlined on hot path) ──────────────────────────────
 function syncSend() {
@@ -65,6 +69,13 @@ function autoResize(el) {
   const e = el || inputEl;
   e.style.height = 'auto';
   e.style.height = Math.min(e.scrollHeight, 120) + 'px';
+}
+
+function fmtCycles(n) {
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+  if (n >= 1e9)  return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6)  return (n / 1e6).toFixed(0) + 'M';
+  return n.toString();
 }
 
 function handleKey(e) {
@@ -205,6 +216,12 @@ async function refreshMetrics() {
     statCalls.textContent = m.total_calls.toString();
     statQueue.textContent = q.toString();
     statCycles.textContent = (Number(bal) / 1e12).toFixed(2) + 'T';
+    const spent = Number(m.total_cycles_spent);
+    statSpent.textContent = fmtCycles(spent);
+    statSpent.title = m.total_calls > 0
+      ? 'Avg: ' + fmtCycles(spent / Number(m.total_calls)) + '/call'
+      : '';
+    statCost.textContent = '$' + (spent * 1.33 / 1e12).toFixed(4);
   } catch {}
 }
 
@@ -246,13 +263,16 @@ function sendMessage() {
 async function drainQueue() {
   if (processing) return;
   processing = true;
-  while (queue.length) {
+  stopped = false;
+  stopBtn.style.display = 'flex';
+  while (queue.length && !stopped) {
     const text = queue.shift();
     chatArea.appendChild(typingEl);
     typingEl.classList.add('show');
     scroll();
     try {
       const r = await actor.chat(text);
+      if (stopped) break;
       if (r?.Ok != null) {
         appendMsg('assistant', r.Ok);
       } else if (r?.Err != null) {
@@ -263,13 +283,22 @@ async function drainQueue() {
       refreshMetrics();
       if (memPanelOpen) setTimeout(refreshMemory, 1500);
     } catch (e) {
-      appendMsg('system', 'Call failed: ' + (e?.message || e));
+      if (!stopped) appendMsg('system', 'Call failed: ' + (e?.message || e));
     } finally {
       typingEl.classList.remove('show');
       scroll();
     }
   }
   processing = false;
+  stopBtn.style.display = 'none';
+}
+
+function stopQueue() {
+  stopped = true;
+  queue.length = 0;
+  typingEl.classList.remove('show');
+  stopBtn.style.display = 'none';
+  toast('Stopped — send a new message anytime');
 }
 
 // ── PicoMem ──────────────────────────────────────────────────────────
@@ -338,7 +367,7 @@ async function clearMemory() {
 
 // ── Wire up ─────────────────────────────────────────────────────────
 window._pc = {
-  sendMessage, loadHistory, handleKey, autoResize,
+  sendMessage, loadHistory, handleKey, autoResize, stopQueue,
   toggleAuthDropdown, loginII, loginPlug,
   toggleMemPanel, refreshMemory, triggerCompress, clearMemory,
 };
@@ -347,7 +376,9 @@ window._pc = {
 await initAuth();
 syncSend();
 checkHealth();
-if (!identity) {
+if (identity) {
+  refreshMemory();
+} else {
   chatArea.innerHTML = '<div class="msg system">Connect a wallet to start chatting.</div>';
 }
 setInterval(refreshMetrics, 30000);
