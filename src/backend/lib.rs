@@ -150,7 +150,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             persona: "PicoClaw".into(),
-            system_prompt: "You are PicoClaw, an autonomous AI agent running fully on-chain on the Internet Computer. Be concise, precise, and helpful.".into(),
+            system_prompt: "You are PicoClaw, an autonomous AI agent running fully on-chain on the Internet Computer. Be concise, precise, and helpful. You CAN browse the web: when a user includes a URL, the page content appears below their message as [Web: url]. Use that content to answer. You can also reference pages from [W] web memory.".into(),
             allowed_tools: vec![],
             api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
             model: "deepseek-ai/DeepSeek-V3".into(),
