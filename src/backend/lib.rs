@@ -458,9 +458,6 @@ thread_local! {
 
     static MSG_COUNTER: RefCell<u64> = RefCell::new(0);
     static TASK_COUNTER: RefCell<u64> = RefCell::new(0);
-
-    // Model list cache: (model_ids, timestamp_nanos) — refreshed hourly
-    static MODEL_CACHE: RefCell<(Vec<String>, u64)> = RefCell::new((vec![], 0));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1316,71 +1313,18 @@ fn clear_web_memory() -> Result<(), String> {
 //  Model selector
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Extract model IDs from OpenAI-format /v1/models JSON response.
-fn extract_model_ids(body: &[u8]) -> Vec<String> {
-    let s = match std::str::from_utf8(body) { Ok(s) => s, Err(_) => return vec![] };
-    let mut ids = Vec::new();
-    let needle = "\"id\":\"";
-    let mut pos = 0;
-    while let Some(start) = s[pos..].find(needle) {
-        let start = pos + start + needle.len();
-        if let Some(end) = s[start..].find('"') {
-            let id = &s[start..start + end];
-            if !id.is_empty() { ids.push(id.to_string()); }
-            pos = start + end + 1;
-        } else { break; }
-    }
-    ids
-}
+const AVAILABLE_MODELS: &[&str] = &[
+    "deepseek-ai/DeepSeek-V3",
+    "deepseek-ai/DeepSeek-R1",
+    "MiniMaxAI/MiniMax-M2.5-TEE",
+    "Qwen/Qwen3-235B-A22B",
+    "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+    "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+];
 
-#[ic_cdk::update]
-async fn list_models() -> Result<Vec<String>, String> {
-    require_authorized()?;
-
-    // Return cache if fresh (< 1 hour)
-    let now = ic_cdk::api::time();
-    let cached = MODEL_CACHE.with(|c| {
-        let (ref models, ts) = *c.borrow();
-        if !models.is_empty() && now.saturating_sub(ts) < 3_600_000_000_000 {
-            Some(models.clone())
-        } else { None }
-    });
-    if let Some(models) = cached { return Ok(models); }
-
-    let config = get_config();
-    let api_key = config.api_key.as_deref()
-        .ok_or("API key not configured")?.to_string();
-
-    let models_url = config.api_endpoint
-        .trim_end_matches("/chat/completions")
-        .to_string() + "/models";
-
-    let request = HttpRequestArgs {
-        url: models_url,
-        method: HttpMethod::GET,
-        body: None,
-        max_response_bytes: Some(50_000),
-        transform: None,
-        headers: vec![
-            HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
-        ],
-        is_replicated: Some(false),
-    };
-
-    bump_metric(|m| m.total_calls += 1);
-    let bal_before = ic_cdk::api::canister_cycle_balance();
-    let response = mgmt_http_request(&request).await
-        .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Models fetch failed: {:?}", e) })?;
-    let bal_after = ic_cdk::api::canister_cycle_balance();
-    bump_metric(|m| m.total_cycles_spent += bal_before.saturating_sub(bal_after) as u64);
-
-    let ids = extract_model_ids(&response.body);
-    if ids.is_empty() {
-        return Err("No models found".into());
-    }
-
-    MODEL_CACHE.with(|c| *c.borrow_mut() = (ids.clone(), now));
-    Ok(ids)
+#[ic_cdk::query]
+fn list_models() -> Vec<String> {
+    AVAILABLE_MODELS.iter().map(|s| s.to_string()).collect()
 }
 
 #[ic_cdk::update]

@@ -237,7 +237,7 @@ async function loadModels() {
       actor.list_models(),
       actor.get_config_public(),
     ]);
-    const models = r?.Ok || [];
+    const models = Array.isArray(r) ? r : (r?.Ok || []);
     modelSelect.innerHTML = '';
     for (const id of models) {
       const opt = document.createElement('option');
