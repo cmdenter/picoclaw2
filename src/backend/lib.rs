@@ -150,7 +150,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             persona: "PicoClaw".into(),
-            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only, no markdown formatting. You have a web_search tool — use it for any current events, news, prices, weather, scores, or real-time info. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W]. Never say you cannot browse or access the web.".into(),
+            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only — no markdown, no **, no #. You MUST call the web_search tool for ANY question about current events, news, prices, weather, sports, stocks, or anything requiring up-to-date information. NEVER say you cannot browse the web. NEVER tell the user to check a website. ALWAYS use web_search instead. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W].".into(),
             allowed_tools: vec![],
             api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
             model: "deepseek-ai/DeepSeek-V3".into(),
@@ -736,6 +736,29 @@ fn extract_json_string_field(s: &str, needle: &str) -> Option<String> {
 }
 
 
+/// Detect if the AI refused to search and told the user to check a website instead.
+fn is_search_refusal(reply: &str) -> bool {
+    let lower = reply.to_lowercase();
+    // Must match at least one refusal pattern
+    let refusal = lower.contains("i can't browse")
+        || lower.contains("i cannot browse")
+        || lower.contains("i can't access")
+        || lower.contains("i cannot access")
+        || lower.contains("i don't have access to real-time")
+        || lower.contains("i don't have the ability to browse")
+        || lower.contains("check a reliable news")
+        || lower.contains("check a news website")
+        || lower.contains("recommend checking")
+        || lower.contains("visit a website")
+        || lower.contains("i'm unable to fetch")
+        || lower.contains("i'm unable to browse")
+        || lower.contains("i can't fetch")
+        || lower.contains("cannot fetch the latest")
+        || lower.contains("don't have real-time")
+        || lower.contains("no real-time access");
+    refusal
+}
+
 async fn pico_search(query: &str) -> Result<String, String> {
     let encoded: String = query.chars().map(|c| {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
@@ -746,16 +769,15 @@ async fn pico_search(query: &str) -> Result<String, String> {
             format!("%{:02X}", c as u32)
         }
     }).collect();
-    // Google News RSS: free, no auth, returns XML with headlines + sources
+    // Google News RSS: free, no auth, clean XML with headlines
     let search_url = format!(
-        "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en",
-        encoded
+        "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en", encoded
     );
     let request = HttpRequestArgs {
         url: search_url,
         method: HttpMethod::GET,
         body: None,
-        max_response_bytes: Some(20_000),
+        max_response_bytes: Some(64_000), // RSS can be large
         transform: None,
         headers: vec![],
         is_replicated: Some(false),
@@ -769,7 +791,7 @@ async fn pico_search(query: &str) -> Result<String, String> {
 
     let xml = String::from_utf8(response.body)
         .map_err(|_| String::from("Error decoding search results"))?;
-    // Extract <title>...</title> entries from RSS (skip first 2 which are feed titles)
+    // Parse RSS: extract <title> entries (skip first 2 = feed-level titles)
     let mut results = String::with_capacity(2000);
     let mut count = 0u8;
     let mut pos = 0usize;
@@ -780,15 +802,13 @@ async fn pico_search(query: &str) -> Result<String, String> {
             pos = abs_start + end + 8;
             count += 1;
             if count <= 2 { continue; } // skip feed-level titles
-            if count > 12 { break; } // cap at 10 results
+            if count > 12 { break; }
             results.push_str(&format!("{}. {}\n", count - 2, title));
         } else {
             break;
         }
     }
-    if results.is_empty() {
-        results.push_str("No results found.");
-    }
+    if results.is_empty() { results.push_str("No results found."); }
     Ok(results)
 }
 
@@ -910,7 +930,7 @@ fn build_messages_json(config: &AgentConfig, prompt: &str) -> String {
     json
 }
 
-const TOOLS_JSON: &str = r#","tools":[{"type":"function","function":{"name":"web_search","description":"Search the web for current information: news, prices, weather, sports, facts, or anything you need real-time data for. Always use this instead of saying you cannot browse.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}}}]"#;
+const TOOLS_JSON: &str = r#","tools":[{"type":"function","function":{"name":"web_search","description":"Search the web for current information: news, prices, weather, sports, facts, or anything you need real-time data for. Always use this instead of saying you cannot browse.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}}}],"tool_choice":"auto""#;
 
 fn build_request_body(config: &AgentConfig, prompt: &str) -> Vec<u8> {
     build_request_body_inner(config, prompt, true)
@@ -1253,6 +1273,45 @@ async fn chat(prompt: String) -> Result<String, String> {
         bump_metric(|m| m.errors += 1);
         return Err("Empty response from LLM".into());
     }
+
+    // Refusal detection: if AI refused to search and told user to check a website,
+    // force a search with the user's original prompt and re-call
+    let reply = if is_search_refusal(&reply) {
+        let query = prompt.clone();
+        match pico_search(&query).await {
+            Ok(results) => {
+                let label: String = query.chars().take(60).collect();
+                store_web_entry(&format!("search: {}", label), &results);
+                let truncated: String = results.chars().take(6000).collect();
+                let search_prompt = format!(
+                    "{}\n\n[Search results for: {}]\n{}", prompt, query, truncated
+                );
+                let body2 = build_request_body_no_tools(&config, &search_prompt);
+                let req2 = HttpRequestArgs {
+                    url: config.api_endpoint.clone(),
+                    max_response_bytes: Some(config.max_response_bytes),
+                    method: HttpMethod::POST,
+                    headers: vec![
+                        HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
+                        HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
+                    ],
+                    body: Some(body2),
+                    transform: None,
+                    is_replicated: Some(false),
+                };
+                bump_metric(|m| m.total_calls += 1);
+                let b2 = ic_cdk::api::canister_cycle_balance();
+                let resp2 = mgmt_http_request(&req2).await
+                    .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Forced search failed: {:?}", e) })?;
+                let b3 = ic_cdk::api::canister_cycle_balance();
+                bump_metric(|m| m.total_cycles_spent += b2.saturating_sub(b3) as u64);
+                extract_content(&resp2.body).unwrap_or(reply)
+            }
+            Err(_) => reply, // search failed, return original reply
+        }
+    } else {
+        reply
+    };
 
     log_message("assistant", &reply);
 
