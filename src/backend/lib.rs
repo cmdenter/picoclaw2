@@ -1,7 +1,6 @@
 use candid::{CandidType, Deserialize, Principal};
 use ic_cdk::api::management_canister::http_request::{
-    http_request as management_http_request, CanisterHttpRequestArgument, HttpHeader, HttpMethod,
-    HttpResponse as MgmtHttpResponse, TransformArgs, TransformContext, TransformFunc,
+    HttpResponse as MgmtHttpResponse, TransformArgs,
 };
 use ic_cdk_timers::set_timer;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
@@ -38,42 +37,6 @@ fn json_escape(s: &str) -> String {
     out
 }
 
-/// Extract the first `"content":"<value>"` from an OpenAI-compatible JSON response.
-fn extract_content(body: &[u8]) -> Option<String> {
-    let s = std::str::from_utf8(body).ok()?;
-    let needle = "\"content\":\"";
-    let start = s.find(needle)? + needle.len();
-    let rest = &s[start..];
-
-    let mut result = String::new();
-    let mut chars = rest.chars();
-    loop {
-        match chars.next()? {
-            '"' => return Some(result),
-            '\\' => match chars.next()? {
-                '"' => result.push('"'),
-                '\\' => result.push('\\'),
-                'n' => result.push('\n'),
-                'r' => result.push('\r'),
-                't' => result.push('\t'),
-                '/' => result.push('/'),
-                'u' => {
-                    let hex: String = chars.by_ref().take(4).collect();
-                    if let Ok(cp) = u32::from_str_radix(&hex, 16) {
-                        if let Some(c) = char::from_u32(cp) {
-                            result.push(c);
-                        }
-                    }
-                }
-                c => {
-                    result.push('\\');
-                    result.push(c);
-                }
-            },
-            c => result.push(c),
-        }
-    }
-}
 
 /// Extract `"prompt":"<value>"` from a simple JSON body.
 fn extract_prompt(body: &[u8]) -> Option<String> {
@@ -155,9 +118,9 @@ impl Default for AgentConfig {
             persona: "PicoClaw".into(),
             system_prompt: "You are PicoClaw, an autonomous AI agent running fully on-chain on the Internet Computer. Be concise, precise, and helpful.".into(),
             allowed_tools: vec![],
-            api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
-            model: "deepseek-ai/DeepSeek-V3".into(),
-            api_endpoint: "https://chutes-proxy.vercel.app/api/llm".into(),
+            api_key: None,
+            model: "llama3.1-8b".into(),
+            api_endpoint: String::new(),
             max_context_messages: 1, // >0 = include truncated last-assistant reply for continuity
             max_response_bytes: 8192,
             allowed_callers: vec![],
@@ -494,93 +457,6 @@ fn log_message(role: &str, content: &str) {
     }
 }
 
-/// Build the ultra-compressed messages array.  Exactly 2-3 JSON messages:
-///   1. system prompt + structured PicoState (I:/T:/E:/P: tiers)
-///   2. last assistant reply, truncated (for reference continuity) — optional
-///   3. current user prompt
-///
-/// PicoState IS the memory.  Each tier is labeled for the LLM to parse.
-fn build_messages_json(config: &AgentConfig, prompt: &str) -> String {
-    let mut json = String::with_capacity(4096);
-    json.push('[');
-
-    // ── message 1: system prompt + tiered PicoState ──
-    let state = SESSION_NOTES.with(|s| s.borrow().get().clone());
-    json.push_str("{\"role\":\"system\",\"content\":\"");
-    json.push_str(&json_escape(&config.system_prompt));
-
-    let has_state = !state.identity.is_empty() || !state.thread.is_empty()
-        || !state.episodes.is_empty() || !state.priors.is_empty();
-    if has_state {
-        json.push_str("\\n\\n[M]\\n");
-        if !state.identity.is_empty() {
-            json.push_str("I:");
-            json.push_str(&json_escape(&state.identity));
-            json.push_str("\\n");
-        }
-        if !state.thread.is_empty() {
-            json.push_str("T:");
-            json.push_str(&json_escape(&state.thread));
-            json.push_str("\\n");
-        }
-        if !state.episodes.is_empty() {
-            json.push_str("E:");
-            json.push_str(&json_escape(&state.episodes));
-            json.push_str("\\n");
-        }
-        if !state.priors.is_empty() {
-            json.push_str("P:");
-            json.push_str(&json_escape(&state.priors));
-        }
-    }
-    json.push_str("\"}");
-
-    // ── message 2 (optional): last assistant reply, truncated for continuity ──
-    if config.max_context_messages > 0 {
-        let counter = MSG_COUNTER.with(|c| *c.borrow());
-        let last_asst: Option<String> = CHAT_LOG.with(|c| {
-            let map = c.borrow();
-            let floor = counter.saturating_sub(4);
-            for id in (floor..counter).rev() {
-                if let Some(msg) = map.get(&id) {
-                    if msg.role == "assistant" {
-                        return Some(msg.content.clone());
-                    }
-                }
-            }
-            None
-        });
-
-        if let Some(content) = last_asst {
-            let truncated = truncate_utf8(&content, LAST_REPLY_MAX_CHARS);
-            json.push_str(",{\"role\":\"assistant\",\"content\":\"");
-            json.push_str(&json_escape(truncated));
-            if content.len() > LAST_REPLY_MAX_CHARS {
-                json.push_str("...");
-            }
-            json.push_str("\"}");
-        }
-    }
-
-    // ── message 3: current user prompt ──
-    json.push_str(",{\"role\":\"user\",\"content\":\"");
-    json.push_str(&json_escape(prompt));
-    json.push_str("\"}");
-
-    json.push(']');
-    json
-}
-
-fn build_request_body(config: &AgentConfig, prompt: &str) -> Vec<u8> {
-    let messages = build_messages_json(config, prompt);
-    let mut body = String::with_capacity(messages.len() + 128);
-    body.push_str("{\"model\":\"");
-    body.push_str(&json_escape(&config.model));
-    body.push_str("\",\"messages\":");
-    body.push_str(&messages);
-    body.push_str(",\"temperature\":0.7,\"max_tokens\":2048}");
-    body.into_bytes()
-}
 
 const MAX_PROMPT_BYTES: usize = 4096;
 
@@ -689,16 +565,6 @@ fn parse_tiers(output: &str) -> (String, String, String) {
     (identity, thread, episodes)
 }
 
-/// Build a raw JSON request body for an arbitrary messages array (used by compress).
-fn build_raw_request_body(config: &AgentConfig, messages_json: &str) -> Vec<u8> {
-    let mut body = String::with_capacity(messages_json.len() + 128);
-    body.push_str("{\"model\":\"");
-    body.push_str(&json_escape(&config.model));
-    body.push_str("\",\"messages\":");
-    body.push_str(messages_json);
-    body.push_str(",\"temperature\":0.3,\"max_tokens\":640}");
-    body.into_bytes()
-}
 
 /// Check whether automatic compression should run.
 fn should_compress(config: &AgentConfig) -> bool {
@@ -711,14 +577,10 @@ fn should_compress(config: &AgentConfig) -> bool {
     msgs_since >= config.compress_interval as u64
 }
 
-/// Compress recent conversation into PicoState tiers via an LLM call.
+/// Compress recent conversation into PicoState tiers via an on-chain LLM call.
 /// LLM outputs I:/T:/E: lines; canister parses and stores per-tier.
 /// Priors (P:) are preserved — they're Wasm-managed, not LLM-managed.
 async fn run_compression() -> Result<(), String> {
-    let config = get_config();
-    let api_key = config.api_key.as_deref()
-        .ok_or("API key not configured")?.to_string();
-
     let counter = MSG_COUNTER.with(|c| *c.borrow());
     let state = SESSION_NOTES.with(|s| s.borrow().get().clone());
     let last_compressed = state.msg_id_at_compress;
@@ -766,107 +628,56 @@ T: telegram-style current thread, max 580 chars. REPLACE old thread with latest 
 E: rolling episode log. IF topic changed: prepend 1-line old-thread archive to existing list; drop oldest if >880ch. IF same topic: keep existing E unchanged.\n\
 Rules: no articles, no filler, pipe-delimit facts, abbreviate aggressively. ONLY output I:/T:/E: lines.";
 
-    let mut messages_json = String::with_capacity(compress_prompt.len() + 768);
-    messages_json.push_str("[{\"role\":\"system\",\"content\":\"");
-    messages_json.push_str(&json_escape(sys));
-    messages_json.push_str("\"},{\"role\":\"user\",\"content\":\"");
-    messages_json.push_str(&json_escape(&compress_prompt));
-    messages_json.push_str("\"}]");
+    let messages = vec![
+        ic_llm::ChatMessage::System { content: sys.to_string() },
+        ic_llm::ChatMessage::User { content: compress_prompt },
+    ];
 
-    let body = build_raw_request_body(&config, &messages_json);
-    let cycle_budget = calc_cycles(body.len(), 3072); // larger budget for multi-tier output
+    bump_metric(|m| m.total_calls += 1);
+    let bal_before = ic_cdk::api::canister_balance128();
+    let response = ic_llm::chat(ic_llm::Model::Llama3_1_8B)
+        .with_messages(messages)
+        .send()
+        .await;
+    let bal_after = ic_cdk::api::canister_balance128();
+    let actual_spent = bal_before.saturating_sub(bal_after) as u64;
+    bump_metric(|m| m.total_cycles_spent += actual_spent);
 
-    let request = CanisterHttpRequestArgument {
-        url: config.api_endpoint.clone(),
-        max_response_bytes: Some(3072),
-        method: HttpMethod::POST,
-        headers: vec![
-            HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
-            HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
-        ],
-        body: Some(body),
-        transform: Some(TransformContext {
-            function: TransformFunc(candid::Func {
-                principal: ic_cdk::api::id(),
-                method: "transform_llm_response".into(),
-            }),
-            context: vec![],
-        }),
+    let raw = response.message.content.unwrap_or_default();
+    if raw.is_empty() {
+        bump_metric(|m| m.errors += 1);
+        return Err("Empty response from LLM compression".into());
+    }
+
+    let (new_i, new_t, new_e) = parse_tiers(&raw);
+
+    // Robust fallback: if parser got nothing, treat raw as thread, keep existing I/E
+    let (identity, thread, episodes) = if new_i.is_empty() && new_t.is_empty() && new_e.is_empty() {
+        (state.identity.clone(),
+         truncate_utf8(&raw, MAX_THREAD_CHARS).to_string(),
+         state.episodes.clone())
+    } else {
+        (if new_i.is_empty() { state.identity.clone() }
+            else { truncate_utf8(&new_i, MAX_IDENTITY_CHARS).to_string() },
+         truncate_utf8(&new_t, MAX_THREAD_CHARS).to_string(),
+         if new_e.is_empty() { state.episodes.clone() }
+            else { truncate_utf8(&new_e, MAX_EPISODES_CHARS).to_string() })
     };
 
-    let bal_before = ic_cdk::api::canister_balance128();
-    match management_http_request(request, cycle_budget).await {
-        Ok((response,)) => {
-            let bal_after = ic_cdk::api::canister_balance128();
-            let actual_spent = bal_before.saturating_sub(bal_after) as u64;
+    SESSION_NOTES.with(|s| {
+        let _ = s.borrow_mut().set(PicoState {
+            identity,
+            thread,
+            episodes,
+            priors: state.priors.clone(), // preserve Wasm-managed priors
+            updated_at: ic_cdk::api::time(),
+            msg_id_at_compress: counter,
+        });
+    });
 
-            // Check for non-2xx HTTP status
-            let status = response.status.0.to_u64_digits();
-            let status_code = if status.is_empty() { 0u64 } else { status[0] };
-            if status_code < 200 || status_code >= 300 {
-                let body_str = String::from_utf8_lossy(&response.body);
-                bump_metric(|m| { m.errors += 1; m.total_cycles_spent += actual_spent; });
-                return Err(format!("LLM API error ({}): {}", status_code, body_str));
-            }
-
-            // Body is already the extracted content (transform stripped non-deterministic fields)
-            let raw = String::from_utf8_lossy(&response.body).into_owned();
-            if raw.is_empty() {
-                bump_metric(|m| { m.errors += 1; m.total_cycles_spent += actual_spent; });
-                return Err("Empty response from LLM compression".into());
-            }
-
-            let (new_i, new_t, new_e) = parse_tiers(&raw);
-
-            // Robust fallback: if parser got nothing, treat raw as thread, keep existing I/E
-            let (identity, thread, episodes) = if new_i.is_empty() && new_t.is_empty() && new_e.is_empty() {
-                (state.identity.clone(),
-                 truncate_utf8(&raw, MAX_THREAD_CHARS).to_string(),
-                 state.episodes.clone())
-            } else {
-                (if new_i.is_empty() { state.identity.clone() }
-                    else { truncate_utf8(&new_i, MAX_IDENTITY_CHARS).to_string() },
-                 truncate_utf8(&new_t, MAX_THREAD_CHARS).to_string(),
-                 if new_e.is_empty() { state.episodes.clone() }
-                    else { truncate_utf8(&new_e, MAX_EPISODES_CHARS).to_string() })
-            };
-
-            SESSION_NOTES.with(|s| {
-                let _ = s.borrow_mut().set(PicoState {
-                    identity,
-                    thread,
-                    episodes,
-                    priors: state.priors.clone(), // preserve Wasm-managed priors
-                    updated_at: ic_cdk::api::time(),
-                    msg_id_at_compress: counter,
-                });
-            });
-
-            bump_metric(|m| { m.total_calls += 1; m.total_cycles_spent += actual_spent; });
-            Ok(())
-        }
-        Err((code, msg)) => {
-            let bal_after = ic_cdk::api::canister_balance128();
-            let actual_spent = bal_before.saturating_sub(bal_after) as u64;
-            bump_metric(|m| { m.errors += 1; m.total_cycles_spent += actual_spent; });
-            Err(format!("Compression failed ({:?}): {}", code, msg))
-        }
-    }
+    Ok(())
 }
 
-/// Calculate exact cycle cost for an HTTP outcall based on ICP pricing.
-/// Formula (13-node app subnet):
-///   base:     49_140_000
-///   request:  5_200 per byte
-///   response: 10_400 per max_response_byte
-/// Add 20% safety margin for subnet variability.
-fn calc_cycles(request_bytes: usize, max_response_bytes: u64) -> u128 {
-    let base: u128 = 49_140_000;
-    let req_cost = request_bytes as u128 * 5_200;
-    let resp_cost = max_response_bytes as u128 * 10_400;
-    let total = base + req_cost + resp_cost;
-    total + total / 5 // +20% margin
-}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Admin endpoints
@@ -913,81 +724,97 @@ async fn chat(prompt: String) -> Result<String, String> {
     }
 
     let config = get_config();
-    let api_key = config
-        .api_key
-        .as_deref()
-        .ok_or("API key not configured")?
-        .to_string();
 
     // Log user message
     log_message("user", &prompt);
 
-    let body = build_request_body(&config, &prompt);
-    let cycle_budget = calc_cycles(body.len(), config.max_response_bytes);
+    // Build system message with PicoState tiers
+    let state = SESSION_NOTES.with(|s| s.borrow().get().clone());
+    let mut system_content = config.system_prompt.clone();
+    let has_state = !state.identity.is_empty() || !state.thread.is_empty()
+        || !state.episodes.is_empty() || !state.priors.is_empty();
+    if has_state {
+        system_content.push_str("\n\n[M]\n");
+        if !state.identity.is_empty() {
+            system_content.push_str("I:");
+            system_content.push_str(&state.identity);
+            system_content.push('\n');
+        }
+        if !state.thread.is_empty() {
+            system_content.push_str("T:");
+            system_content.push_str(&state.thread);
+            system_content.push('\n');
+        }
+        if !state.episodes.is_empty() {
+            system_content.push_str("E:");
+            system_content.push_str(&state.episodes);
+            system_content.push('\n');
+        }
+        if !state.priors.is_empty() {
+            system_content.push_str("P:");
+            system_content.push_str(&state.priors);
+        }
+    }
 
-    let request = CanisterHttpRequestArgument {
-        url: config.api_endpoint.clone(),
-        max_response_bytes: Some(config.max_response_bytes),
-        method: HttpMethod::POST,
-        headers: vec![
-            HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
-            HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
-        ],
-        body: Some(body),
-        transform: Some(TransformContext {
-            function: TransformFunc(candid::Func {
-                principal: ic_cdk::api::id(),
-                method: "transform_llm_response".into(),
-            }),
-            context: vec![],
-        }),
-    };
+    let mut messages: Vec<ic_llm::ChatMessage> = vec![
+        ic_llm::ChatMessage::System { content: system_content },
+    ];
+
+    // Optional: last assistant reply for continuity
+    if config.max_context_messages > 0 {
+        let counter = MSG_COUNTER.with(|c| *c.borrow());
+        let last_asst: Option<String> = CHAT_LOG.with(|c| {
+            let map = c.borrow();
+            let floor = counter.saturating_sub(4);
+            for id in (floor..counter).rev() {
+                if let Some(msg) = map.get(&id) {
+                    if msg.role == "assistant" {
+                        return Some(msg.content.clone());
+                    }
+                }
+            }
+            None
+        });
+        if let Some(content) = last_asst {
+            let truncated = truncate_utf8(&content, LAST_REPLY_MAX_CHARS).to_string();
+            messages.push(ic_llm::ChatMessage::Assistant(ic_llm::AssistantMessage {
+                content: Some(truncated),
+                tool_calls: vec![],
+            }));
+        }
+    }
+
+    messages.push(ic_llm::ChatMessage::User { content: prompt });
 
     bump_metric(|m| m.total_calls += 1);
 
     let bal_before = ic_cdk::api::canister_balance128();
-    match management_http_request(request, cycle_budget).await {
-        Ok((response,)) => {
-            let bal_after = ic_cdk::api::canister_balance128();
-            let actual_spent = bal_before.saturating_sub(bal_after) as u64;
-            bump_metric(|m| m.total_cycles_spent += actual_spent);
+    let response = ic_llm::chat(ic_llm::Model::Llama3_1_8B)
+        .with_messages(messages)
+        .send()
+        .await;
+    let bal_after = ic_cdk::api::canister_balance128();
+    let actual_spent = bal_before.saturating_sub(bal_after) as u64;
+    bump_metric(|m| m.total_cycles_spent += actual_spent);
 
-            // Check for non-2xx HTTP status
-            let status = response.status.0.to_u64_digits();
-            let status_code = if status.is_empty() { 0u64 } else { status[0] };
-            if status_code < 200 || status_code >= 300 {
-                let body_str = String::from_utf8_lossy(&response.body);
-                bump_metric(|m| m.errors += 1);
-                return Err(format!("LLM API error ({}): {}", status_code, body_str));
-            }
-
-            // Body is already the extracted content (transform stripped non-deterministic fields)
-            let reply = String::from_utf8_lossy(&response.body).into_owned();
-            if reply.is_empty() {
-                bump_metric(|m| m.errors += 1);
-                return Err("Empty response from LLM".into());
-            }
-
-            log_message("assistant", &reply);
-
-            // Schedule background compression if needed
-            if should_compress(&config) {
-                set_timer(Duration::from_secs(0), || {
-                    ic_cdk::spawn(async {
-                        let _ = run_compression().await;
-                    });
-                });
-            }
-
-            Ok(reply)
-        }
-        Err((code, msg)) => {
-            let bal_after = ic_cdk::api::canister_balance128();
-            let actual_spent = bal_before.saturating_sub(bal_after) as u64;
-            bump_metric(|m| { m.errors += 1; m.total_cycles_spent += actual_spent; });
-            Err(format!("HTTP outcall failed ({:?}): {}", code, msg))
-        }
+    let reply = response.message.content.unwrap_or_default();
+    if reply.is_empty() {
+        bump_metric(|m| m.errors += 1);
+        return Err("Empty response from LLM".into());
     }
+
+    log_message("assistant", &reply);
+
+    // Schedule background compression if needed
+    if should_compress(&config) {
+        set_timer(Duration::from_secs(0), || {
+            ic_cdk::spawn(async {
+                let _ = run_compression().await;
+            });
+        });
+    }
+
+    Ok(reply)
 }
 
 /// Backward-compatible alias.
@@ -996,17 +823,10 @@ async fn send_prompt_to_llm(prompt: String) -> Result<String, String> {
     chat(prompt).await
 }
 
+/// Kept as no-op for backward compatibility with .did file.
 #[ic_cdk::query]
 fn transform_llm_response(raw: TransformArgs) -> MgmtHttpResponse {
-    let mut r = raw.response;
-    r.headers.clear();
-    // Extract only the content field from the response body.
-    // The full body contains non-deterministic fields (id, created, chutes_verification)
-    // that differ per subnet node, causing consensus failure.
-    if let Some(content) = extract_content(&r.body) {
-        r.body = content.into_bytes();
-    }
-    r
+    raw.response
 }
 
 // ═══════════════════════════════════════════════════════════════════════

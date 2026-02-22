@@ -13,6 +13,7 @@ ic-cdk-timers = "0.6"
 ic-stable-structures = "0.6"
 candid = "0.10"
 serde = { version = "1.0", features = ["derive"] }
+ic-llm = "1.1.0"
 
 [profile.release]
 lto = true
