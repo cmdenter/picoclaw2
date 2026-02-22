@@ -370,11 +370,14 @@ async def price(coin: str = Query("bitcoin")):
 # ── Canister API: /api/intel ──────────────────────────────────────
 
 FACT_SYSTEM = (
-    "You extract facts from web data. Output a dense fact list ONLY. "
-    "Rules: lead with numbers, dates, names. "
+    "You extract ONLY meaningful facts from web data. Dense fact list only. "
+    "Rules: lead with numbers, dates, names, prices. "
     "Cite source domain inline like: BTC $97K (coindesk). "
     "Use | to separate facts. No filler, no analysis, no complete sentences. "
-    "No markdown. Pack maximum information into minimum characters."
+    "No markdown. SKIP all navigation text, cookie notices, consent pages, "
+    "privacy settings, 'about' sections, loading indicators, affiliate disclaimers, "
+    "and any text that is website UI rather than actual content. "
+    "Only include facts that directly answer the query."
 )
 
 
@@ -434,6 +437,20 @@ async def api_intel(request: Request):
             return JSONResponse({"ok": True, "f": facts, "s": [domain], "t": int(time.time())})
 
         # mode == "search" (default)
+        # Step 0: If query is about crypto price, prepend live price
+        price_prefix = ""
+        q_lower = query.lower()
+        if any(w in q_lower for w in ["price", "btc", "bitcoin", "eth", "ethereum", "sol", "solana"]):
+            coin = "bitcoin"
+            if "eth" in q_lower or "ethereum" in q_lower: coin = "ethereum"
+            elif "sol" in q_lower or "solana" in q_lower: coin = "solana"
+            try:
+                pd = await get_crypto_price(coin)
+                if "price_usd" in pd:
+                    price_prefix = f"{coin} ${pd['price_usd']:,.2f} ({pd.get('change_24h', 0):+.2f}% 24h) (coingecko) | "
+            except Exception:
+                pass
+
         # Step 1: Search DDG + Google News in parallel
         ddg_task = ddg_search(query, num=10)
         news_task = google_news_rss(query, num=8)
@@ -490,12 +507,17 @@ async def api_intel(request: Request):
             compress_input += f"\n\nScraped pages:{scraped}"
 
         facts = await chutes_chat(
-            f"{compress_input}\n\nExtract ALL key facts. Budget: {max_bytes} chars.",
+            f"{compress_input}\n\nExtract ONLY facts that answer the question. "
+            f"Skip website UI, navigation, cookie/consent text, loading messages, disclaimers. "
+            f"Budget: {max_bytes} chars.",
             system=FACT_SYSTEM, max_tokens=768,
         )
+        facts = price_prefix + facts
         facts = _truncate_utf8(facts, max_bytes)
 
         sources = [scrape_urls[i].split("/")[2] if len(scrape_urls[i].split("/")) > 2 else scrape_urls[i] for i in range(len(scrape_urls))]
+        if price_prefix:
+            sources.insert(0, "coingecko.com")
         elapsed = round(time.time() - t0, 1)
         log_activity("intel", f"search:{query} ({elapsed}s, {len(scrape_urls)} scraped)", "ok")
         return JSONResponse({"ok": True, "f": facts, "s": sources, "t": int(time.time())})
