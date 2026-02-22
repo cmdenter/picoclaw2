@@ -777,7 +777,7 @@ async fn pico_search(query: &str) -> Result<String, String> {
         url: search_url,
         method: HttpMethod::GET,
         body: None,
-        max_response_bytes: Some(64_000), // RSS can be large
+        max_response_bytes: Some(2_000_000), // 2MB — Google News RSS can be large
         transform: None,
         headers: vec![],
         is_replicated: Some(false),
