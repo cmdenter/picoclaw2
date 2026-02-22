@@ -253,13 +253,23 @@ async function loadModels() {
 
 async function switchModel(modelId) {
   if (!actor || !identity || !modelId) return;
+  modelSelect.disabled = true;
+  sendBtn.disabled = true;
+  toast('Switching to ' + modelId.split('/').pop() + '...');
   try {
     const r = await actor.set_model(modelId);
-    if (r?.Ok != null) toast('Model: ' + modelId.split('/').pop());
-    else toast('Set model error: ' + (r?.Err || 'unknown'));
+    if (r?.Ok != null) {
+      toast('Now using ' + modelId.split('/').pop());
+      appendMsg('system', 'Model switched to ' + modelId.split('/').pop());
+      scroll();
+    } else {
+      toast('Set model error: ' + (r?.Err || 'unknown'));
+    }
   } catch (e) {
     toast('Switch failed: ' + (e?.message || e));
   }
+  modelSelect.disabled = false;
+  syncSend();
 }
 
 // ── History ──────────────────────────────────────────────────────────
