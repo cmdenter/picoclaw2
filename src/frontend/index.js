@@ -32,6 +32,9 @@ const nftGrid     = document.getElementById('nftGrid');
 const customAvatarInput = document.getElementById('customAvatarUrl');
 const nftBg       = document.getElementById('nftBg');
 
+// ── Default avatar / background ─────────────────────────────────────
+const DEFAULT_NFT_IMG = 'https://5movr-diaaa-aaaak-aaftq-cai.raw.icp0.io/?type=thumbnail&tokenid=cgymy-lqkor-uwiaa-aaaaa-cqabm-4aqca-aabyj-q';
+
 // ── State ────────────────────────────────────────────────────────────
 let actor = picoclaw;
 let authClient = null;
@@ -477,17 +480,12 @@ async function loadProfile() {
     } else {
       clawName.textContent = 'PicoClaw';
     }
-    if (p.avatar_url) {
-      avatarImg.src = p.avatar_url;
-      avatarImg.style.display = '';
-      avatarSvg.style.display = 'none';
-      selectedNftUrl = p.avatar_url;
-    } else {
-      avatarImg.style.display = 'none';
-      avatarSvg.style.display = '';
-      selectedNftUrl = '';
-    }
-    setNftBackground(p.avatar_url);
+    const imgUrl = p.avatar_url || DEFAULT_NFT_IMG;
+    avatarImg.src = imgUrl;
+    avatarImg.style.display = '';
+    avatarSvg.style.display = 'none';
+    selectedNftUrl = p.avatar_url || '';
+    setNftBackground(imgUrl);
   } catch (e) {
     console.warn('Profile load:', e.message || e);
   }
@@ -533,17 +531,12 @@ async function saveProfile() {
     if (r?.Err != null) return toast('Error: ' + r.Err);
     // Update header
     clawName.textContent = name;
-    if (url) {
-      avatarImg.src = url;
-      avatarImg.style.display = '';
-      avatarSvg.style.display = 'none';
-      selectedNftUrl = url;
-    } else {
-      avatarImg.style.display = 'none';
-      avatarSvg.style.display = '';
-      selectedNftUrl = '';
-    }
-    setNftBackground(url);
+    const imgUrl = url || DEFAULT_NFT_IMG;
+    avatarImg.src = imgUrl;
+    avatarImg.style.display = '';
+    avatarSvg.style.display = 'none';
+    selectedNftUrl = url || '';
+    setNftBackground(imgUrl);
     closeSettings();
     toast('Profile saved');
   } catch (e) {
@@ -565,6 +558,12 @@ window._pc = {
 };
 
 // ── Init ─────────────────────────────────────────────────────────────
+// Show default avatar + background immediately
+avatarImg.src = DEFAULT_NFT_IMG;
+avatarImg.style.display = '';
+avatarSvg.style.display = 'none';
+setNftBackground(DEFAULT_NFT_IMG);
+
 await initAuth();
 syncSend();
 checkHealth();

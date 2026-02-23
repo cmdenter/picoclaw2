@@ -2,7 +2,6 @@ type AgentConfig = record {
     persona : text;
     system_prompt : text;
     allowed_tools : vec text;
-    api_key : opt text;
     model : text;
     api_endpoint : text;
     max_context_messages : nat32;

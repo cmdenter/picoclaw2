@@ -152,7 +152,7 @@ impl Default for AgentConfig {
             persona: "PicoClaw".into(),
             system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only — no markdown, no **, no #. You MUST call the web_search tool for ANY question about current events, news, prices, weather, sports, stocks, or anything requiring up-to-date information. NEVER say you cannot browse the web. NEVER tell the user to check a website. ALWAYS use web_search instead. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W].".into(),
             allowed_tools: vec![],
-            api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
+            api_key: None,
             model: "deepseek-ai/DeepSeek-V3".into(),
             api_endpoint: "https://llm.chutes.ai/v1/chat/completions".into(),
             max_context_messages: 1, // >0 = include truncated last-assistant reply for continuity
@@ -451,6 +451,23 @@ impl Storable for QueuedTask {
     const BOUND: Bound = Bound::Bounded { max_size: 8192, is_fixed_size: false };
 }
 
+/// Opaque wrapper for storing a secret string in its own stable Cell.
+/// Never exposed via any query or Candid interface.
+#[derive(Clone, Default)]
+struct SecretString(String);
+
+impl Storable for SecretString {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Borrowed(self.0.as_bytes())
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        Self(String::from_utf8_lossy(bytes.as_ref()).into_owned())
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 512, is_fixed_size: false };
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  Stable state
 // ═══════════════════════════════════════════════════════════════════════
@@ -495,6 +512,12 @@ thread_local! {
             .expect("user profile cell init")
     );
 
+    // API key stored separately — never exposed via any query endpoint
+    static API_KEY_STORE: RefCell<Cell<SecretString, Memory>> = RefCell::new(
+        Cell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(8))), SecretString::default())
+            .expect("api key cell init")
+    );
+
     static MSG_COUNTER: RefCell<u64> = RefCell::new(0);
     static TASK_COUNTER: RefCell<u64> = RefCell::new(0);
 }
@@ -505,6 +528,14 @@ thread_local! {
 
 fn get_config() -> AgentConfig {
     CONFIG.with(|c| c.borrow().get().clone())
+}
+
+/// Read the API key from its dedicated secure cell (never exposed via queries).
+fn get_api_key() -> Option<String> {
+    API_KEY_STORE.with(|k| {
+        let s = k.borrow().get().0.clone();
+        if s.is_empty() { None } else { Some(s) }
+    })
 }
 
 fn require_controller() -> Result<(), String> {
@@ -1144,8 +1175,8 @@ fn should_compress(config: &AgentConfig) -> bool {
 /// Priors (P:) are preserved — they're Wasm-managed, not LLM-managed.
 async fn run_compression() -> Result<(), String> {
     let config = get_config();
-    let api_key = config.api_key.as_deref()
-        .ok_or("API key not configured")?.to_string();
+    let api_key = get_api_key()
+        .ok_or("API key not configured")?;
 
     let counter = MSG_COUNTER.with(|c| *c.borrow());
     let state = SESSION_NOTES.with(|s| s.borrow().get().clone());
@@ -1411,11 +1442,15 @@ fn get_profile() -> UserProfile {
 #[ic_cdk::update]
 fn set_api_key(key: String) -> Result<(), String> {
     require_controller()?;
+    API_KEY_STORE.with(|k| { let _ = k.borrow_mut().set(SecretString(key)); });
+    // Clear any legacy key that may still be in the config cell
     CONFIG.with(|c| {
         let mut cell = c.borrow_mut();
         let mut cfg = cell.get().clone();
-        cfg.api_key = Some(key);
-        let _ = cell.set(cfg);
+        if cfg.api_key.is_some() {
+            cfg.api_key = None;
+            let _ = cell.set(cfg);
+        }
     });
     Ok(())
 }
@@ -1423,7 +1458,10 @@ fn set_api_key(key: String) -> Result<(), String> {
 #[ic_cdk::update]
 fn configure(config: AgentConfig) -> Result<(), String> {
     require_controller()?;
-    CONFIG.with(|c| { let _ = c.borrow_mut().set(config); });
+    // Never allow the API key to be set via configure — use set_api_key instead
+    let mut clean = config;
+    clean.api_key = None;
+    CONFIG.with(|c| { let _ = c.borrow_mut().set(clean); });
     Ok(())
 }
 
@@ -1431,7 +1469,8 @@ fn configure(config: AgentConfig) -> Result<(), String> {
 fn get_config_public() -> AgentConfig {
     CONFIG.with(|c| {
         let mut cfg = c.borrow().get().clone();
-        cfg.api_key = cfg.api_key.map(|_| "***".into());
+        // Never expose the API key — always return None
+        cfg.api_key = None;
         cfg
     })
 }
@@ -1489,8 +1528,8 @@ async fn chat(prompt: String) -> Result<String, String> {
     }
 
     let config = get_config();
-    let api_key = config.api_key.as_deref()
-        .ok_or("API key not configured")?.to_string();
+    let api_key = get_api_key()
+        .ok_or("API key not configured")?;
 
     log_message("user", &prompt);
 
@@ -1979,10 +2018,15 @@ fn init() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     restore_counters();
-    // Reset model to DeepSeek-V3 and update system prompt
+    // Migrate API key from legacy config field → dedicated secure cell
     CONFIG.with(|c| {
         let mut cell = c.borrow_mut();
         let mut cfg = cell.get().clone();
+        if let Some(key) = cfg.api_key.take() {
+            if key != "***" && !key.is_empty() {
+                API_KEY_STORE.with(|k| { let _ = k.borrow_mut().set(SecretString(key)); });
+            }
+        }
         let defaults = AgentConfig::default();
         cfg.model = defaults.model;
         cfg.system_prompt = defaults.system_prompt;
