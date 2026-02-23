@@ -1,10 +1,13 @@
 use candid::{CandidType, Deserialize, Principal};
 use ic_cdk::management_canister::{
     http_request as mgmt_http_request, HttpHeader, HttpMethod, HttpRequestArgs, HttpRequestResult,
+    VetKDCurve, VetKDDeriveKeyArgs, VetKDKeyId,
 };
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::{Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
+use hkdf::Hkdf;
+use sha2::Sha256;
 use std::borrow::Cow;
 use std::cell::RefCell;
 
@@ -451,21 +454,111 @@ impl Storable for QueuedTask {
     const BOUND: Bound = Bound::Bounded { max_size: 8192, is_fixed_size: false };
 }
 
-/// Opaque wrapper for storing a secret string in its own stable Cell.
+/// Opaque wrapper for storing a secret in its own stable Cell.
+/// Stores either VetKey-encrypted bytes (new format) or legacy plaintext.
 /// Never exposed via any query or Candid interface.
-#[derive(Clone, Default)]
-struct SecretString(String);
+#[derive(Clone)]
+struct SecretString(Vec<u8>);
+
+impl Default for SecretString {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
 
 impl Storable for SecretString {
     fn to_bytes(&self) -> Cow<'_, [u8]> {
-        Cow::Borrowed(self.0.as_bytes())
+        Cow::Borrowed(&self.0)
     }
 
     fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
-        Self(String::from_utf8_lossy(bytes.as_ref()).into_owned())
+        Self(bytes.to_vec())
     }
 
     const BOUND: Bound = Bound::Bounded { max_size: 512, is_fixed_size: false };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  VetKey encryption — API key encrypted at rest via ICP threshold BLS
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Magic header for VetKey-encrypted data: "VK" + version 1
+const ENC_MAGIC: [u8; 3] = [0x56, 0x4B, 0x01];
+const ENC_NONCE_LEN: usize = 16;
+
+/// BLS12-381 G1 identity element (point at infinity, compressed).
+/// Using this as transport_public_key gives back an unencrypted VetKey.
+const G1_IDENTITY: [u8; 48] = {
+    let mut b = [0u8; 48];
+    b[0] = 0xC0; // compressed + infinity flags
+    b
+};
+const G1_BYTES: usize = 48;
+const G2_BYTES: usize = 96;
+/// Offset of the unencrypted VetKey (c3 component) in the derive_key response.
+const VETKEY_C3_OFFSET: usize = G1_BYTES + G2_BYTES; // 144
+
+fn vetkd_key_id() -> VetKDKeyId {
+    VetKDKeyId {
+        curve: VetKDCurve::Bls12_381_G2,
+        name: "test_key_1".to_string(),
+    }
+}
+
+/// Derive a VetKey by calling the management canister with identity transport key.
+/// The result is a 48-byte BLS signature that only this canister can derive.
+async fn derive_vetkey_bytes() -> Result<[u8; G1_BYTES], String> {
+    let args = VetKDDeriveKeyArgs {
+        input: b"picoclaw-api-key".to_vec(),
+        context: b"picoclaw-encryption".to_vec(),
+        key_id: vetkd_key_id(),
+        transport_public_key: G1_IDENTITY.to_vec(),
+    };
+
+    let result = ic_cdk::management_canister::vetkd_derive_key(&args)
+        .await
+        .map_err(|e| format!("VetKD derive key failed: {:?}", e))?;
+
+    let enc = &result.encrypted_key;
+    if enc.len() < VETKEY_C3_OFFSET + G1_BYTES {
+        return Err("Invalid VetKD response length".into());
+    }
+
+    let mut vk = [0u8; G1_BYTES];
+    vk.copy_from_slice(&enc[VETKEY_C3_OFFSET..VETKEY_C3_OFFSET + G1_BYTES]);
+    Ok(vk)
+}
+
+/// Get cached VetKey bytes or derive fresh ones from the management canister.
+async fn get_or_derive_vetkey() -> Result<[u8; G1_BYTES], String> {
+    let cached = VETKEY_CACHE.with(|c| *c.borrow());
+    if let Some(vk) = cached {
+        return Ok(vk);
+    }
+    let vk = derive_vetkey_bytes().await?;
+    VETKEY_CACHE.with(|c| *c.borrow_mut() = Some(vk));
+    Ok(vk)
+}
+
+/// Derive a keystream of `len` bytes from VetKey material + nonce using HKDF-SHA256.
+fn derive_keystream(vetkey: &[u8; G1_BYTES], nonce: &[u8], len: usize) -> Vec<u8> {
+    let hk = Hkdf::<Sha256>::new(Some(nonce), vetkey);
+    let mut okm = vec![0u8; len];
+    hk.expand(b"picoclaw-api-key-v1", &mut okm)
+        .expect("HKDF output length <= 255*32");
+    okm
+}
+
+/// XOR-encrypt (or decrypt) `data` using HKDF-derived keystream.
+fn xor_with_keystream(vetkey: &[u8; G1_BYTES], nonce: &[u8], data: &[u8]) -> Vec<u8> {
+    let ks = derive_keystream(vetkey, nonce, data.len());
+    data.iter().zip(ks.iter()).map(|(d, k)| d ^ k).collect()
+}
+
+/// Check if stored bytes use the VetKey-encrypted format.
+fn is_vetkey_encrypted(data: &[u8]) -> bool {
+    data.len() >= ENC_MAGIC.len() + ENC_NONCE_LEN + 1
+        && data[..ENC_MAGIC.len()] == ENC_MAGIC
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -473,6 +566,9 @@ impl Storable for SecretString {
 // ═══════════════════════════════════════════════════════════════════════
 
 thread_local! {
+    /// Cached VetKey bytes (48) — derived on demand, cleared on upgrade.
+    static VETKEY_CACHE: RefCell<Option<[u8; G1_BYTES]>> = RefCell::new(None);
+
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 
@@ -531,11 +627,24 @@ fn get_config() -> AgentConfig {
 }
 
 /// Read the API key from its dedicated secure cell (never exposed via queries).
-fn get_api_key() -> Option<String> {
-    API_KEY_STORE.with(|k| {
-        let s = k.borrow().get().0.clone();
-        if s.is_empty() { None } else { Some(s) }
-    })
+/// Handles both VetKey-encrypted (new) and plaintext (legacy) formats.
+async fn get_api_key() -> Option<String> {
+    let data = API_KEY_STORE.with(|k| k.borrow().get().0.clone());
+    if data.is_empty() {
+        return None;
+    }
+
+    if is_vetkey_encrypted(&data) {
+        // Encrypted format: magic(3) || nonce(16) || ciphertext
+        let nonce = &data[ENC_MAGIC.len()..ENC_MAGIC.len() + ENC_NONCE_LEN];
+        let ciphertext = &data[ENC_MAGIC.len() + ENC_NONCE_LEN..];
+        let vk = get_or_derive_vetkey().await.ok()?;
+        let plaintext = xor_with_keystream(&vk, nonce, ciphertext);
+        String::from_utf8(plaintext).ok()
+    } else {
+        // Legacy plaintext format
+        String::from_utf8(data).ok().filter(|s| !s.is_empty())
+    }
 }
 
 fn require_controller() -> Result<(), String> {
@@ -1175,7 +1284,7 @@ fn should_compress(config: &AgentConfig) -> bool {
 /// Priors (P:) are preserved — they're Wasm-managed, not LLM-managed.
 async fn run_compression() -> Result<(), String> {
     let config = get_config();
-    let api_key = get_api_key()
+    let api_key = get_api_key().await
         .ok_or("API key not configured")?;
 
     let counter = MSG_COUNTER.with(|c| *c.borrow());
@@ -1440,9 +1549,29 @@ fn get_profile() -> UserProfile {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[ic_cdk::update]
-fn set_api_key(key: String) -> Result<(), String> {
+async fn set_api_key(key: String) -> Result<(), String> {
     require_controller()?;
-    API_KEY_STORE.with(|k| { let _ = k.borrow_mut().set(SecretString(key)); });
+
+    // Derive VetKey for encryption
+    let vk = get_or_derive_vetkey().await?;
+
+    // Generate random nonce
+    let rand = ic_cdk::management_canister::raw_rand()
+        .await
+        .map_err(|e| format!("raw_rand failed: {:?}", e))?;
+    let mut nonce = [0u8; ENC_NONCE_LEN];
+    nonce.copy_from_slice(&rand[..ENC_NONCE_LEN]);
+
+    // Encrypt the API key
+    let ciphertext = xor_with_keystream(&vk, &nonce, key.as_bytes());
+
+    // Store: magic || nonce || ciphertext
+    let mut stored = Vec::with_capacity(ENC_MAGIC.len() + ENC_NONCE_LEN + ciphertext.len());
+    stored.extend_from_slice(&ENC_MAGIC);
+    stored.extend_from_slice(&nonce);
+    stored.extend_from_slice(&ciphertext);
+    API_KEY_STORE.with(|k| { let _ = k.borrow_mut().set(SecretString(stored)); });
+
     // Clear any legacy key that may still be in the config cell
     CONFIG.with(|c| {
         let mut cell = c.borrow_mut();
@@ -1528,7 +1657,7 @@ async fn chat(prompt: String) -> Result<String, String> {
     }
 
     let config = get_config();
-    let api_key = get_api_key()
+    let api_key = get_api_key().await
         .ok_or("API key not configured")?;
 
     log_message("user", &prompt);
@@ -2024,7 +2153,7 @@ fn post_upgrade() {
         let mut cfg = cell.get().clone();
         if let Some(key) = cfg.api_key.take() {
             if key != "***" && !key.is_empty() {
-                API_KEY_STORE.with(|k| { let _ = k.borrow_mut().set(SecretString(key)); });
+                API_KEY_STORE.with(|k| { let _ = k.borrow_mut().set(SecretString(key.into_bytes())); });
             }
         }
         let defaults = AgentConfig::default();
