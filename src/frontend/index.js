@@ -18,8 +18,10 @@ const statSpent = document.getElementById('statSpent');
 const statCost  = document.getElementById('statCost');
 const stopBtn   = document.getElementById('stopBtn');
 const memPanel  = document.getElementById('memPanel');
-const memToggle = document.getElementById('memToggleBtn');
-const memStatus = document.getElementById('memStatus');
+const panelTabs = document.getElementById('panelTabs');
+const memTabBtn = document.getElementById('memTabBtn');
+const walletTabBtn = document.getElementById('walletTabBtn');
+const tabInfo   = document.getElementById('tabInfo');
 const memTs     = document.getElementById('memTs');
 const webMemBody  = document.getElementById('webMemBody');
 const webMemCount = document.getElementById('webMemCount');
@@ -38,10 +40,7 @@ const apiKeyInput = document.getElementById('apiKeyInput');
 const modelDisplay = document.getElementById('modelDisplay');
 
 // Wallet DOM refs
-const walletToggleBar = document.getElementById('walletToggleBar');
-const walletToggleBtn = document.getElementById('walletToggleBtn');
 const walletPanel     = document.getElementById('walletPanel');
-const walletQuickBal  = document.getElementById('walletQuickBal');
 const walletAvailable = document.getElementById('walletAvailable');
 const walletPending   = document.getElementById('walletPending');
 const walletTotalIn   = document.getElementById('walletTotalIn');
@@ -61,9 +60,7 @@ let authClient = null;
 let identity = null;
 let principalId = null;
 let authProvider = null;
-let memPanelOpen = false;
-let walletPanelOpen = false;
-let walletVerified = false;
+let activeTab = null; // null = closed, 'mem' = PicoMem, 'wallet' = Wallet
 let toastTimer = 0;
 let selectedNftUrl = '';
 let devMode = false;
@@ -164,12 +161,25 @@ async function loginII() {
   principalId = identity.getPrincipal().toText();
   authProvider = 'ii';
   await createAuthenticatedActor();
+  // NFT gate — must own NFT to proceed
+  try {
+    const r = await actor.wallet_connect();
+    if (r?.Err) {
+      toast('NFT ownership required');
+      await logout();
+      return;
+    }
+  } catch (e) {
+    toast('NFT verification failed');
+    await logout();
+    return;
+  }
   updateAuthUI(true);
   toast('II connected: ' + principalId.slice(0, 8) + '...');
   syncSend();
   checkHealth();
   loadProfile();
-  checkWalletOwner();
+  refreshWallet();
 }
 
 async function loginPlug() {
@@ -188,12 +198,25 @@ async function loginPlug() {
     authProvider = 'plug';
     const { idlFactory } = await import("declarations/picoclaw");
     actor = await window.ic.plug.createActor({ canisterId, interfaceFactory: idlFactory });
+    // NFT gate — must own NFT to proceed
+    try {
+      const r = await actor.wallet_connect();
+      if (r?.Err) {
+        toast('NFT ownership required');
+        await logout();
+        return;
+      }
+    } catch (e2) {
+      toast('NFT verification failed');
+      await logout();
+      return;
+    }
     updateAuthUI(true);
     toast('Plug connected: ' + principalId.slice(0, 8) + '...');
     syncSend();
     checkHealth();
     loadProfile();
-    checkWalletOwner();
+    refreshWallet();
   } catch(e) {
     console.error('Plug login failed:', e);
     toast('Plug connection failed');
@@ -232,20 +255,15 @@ function updateAuthUI(authenticated) {
     const label = authProvider === 'plug' ? 'Plug' : 'II';
     authBar.innerHTML = `<span class="principal-tag" title="${principalId}">${label}: ${short}</span><button class="auth-btn logout" onclick="window._pc.toggleAuthDropdown()">Disconnect</button>
       <div class="auth-dropdown" id="authDropdown"></div>`;
-    walletToggleBar.classList.add('authed');
+    panelTabs.classList.add('authed');
   } else {
     authBar.innerHTML = `<button class="auth-btn" onclick="window._pc.toggleAuthDropdown()">Connect</button>
       <div class="auth-dropdown" id="authDropdown">
         <button onclick="window._pc.loginII()">Internet Identity</button>
         <button onclick="window._pc.loginPlug()">Plug Wallet</button>
       </div>`;
-    walletToggleBar.classList.remove('authed');
-    walletPanel.classList.remove('show');
-    walletPanelOpen = false;
-    walletVerified = false;
-    walletToggleBtn.classList.remove('active');
-    walletToggleBtn.textContent = 'Verify NFT';
-    walletQuickBal.textContent = '';
+    panelTabs.classList.remove('authed');
+    switchTab(null); // close any open panel
   }
 }
 
@@ -379,7 +397,7 @@ async function drainQueue() {
           appendMsg('assistant', String(r ?? ''));
         }
         refreshMetrics();
-        if (memPanelOpen) setTimeout(refreshMemory, 1500);
+        if (activeTab === 'mem') setTimeout(refreshMemory, 1500);
       }
     } catch (e) {
       if (!stopped) appendMsg('system', 'Call failed: ' + (e?.message || e));
@@ -400,12 +418,20 @@ function stopQueue() {
   toast('Stopped — send a new message anytime');
 }
 
-// ── PicoMem ──────────────────────────────────────────────────────────
-function toggleMemPanel() {
-  memPanelOpen = !memPanelOpen;
-  memPanel.classList.toggle('show', memPanelOpen);
-  memToggle.classList.toggle('active', memPanelOpen);
-  if (memPanelOpen && actor) refreshMemory();
+// ── Tab switching ────────────────────────────────────────────────────
+function switchTab(tab) {
+  if (tab === activeTab) tab = null; // toggle off if same tab clicked
+  activeTab = tab;
+  memPanel.classList.toggle('show', tab === 'mem');
+  walletPanel.classList.toggle('show', tab === 'wallet');
+  memTabBtn.className = tab === 'mem' ? 'active-mem' : '';
+  walletTabBtn.className = tab === 'wallet' ? 'active-wallet' : '';
+  // Update info label
+  if (tab === 'mem') {
+    if (actor) refreshMemory();
+  } else if (tab === 'wallet') {
+    if (actor) refreshWallet();
+  }
 }
 
 function renderTier(elId, sizeId, text, max) {
@@ -440,7 +466,7 @@ async function refreshMemory() {
     } else {
       memTs.textContent = 'never compressed';
     }
-    memStatus.textContent = [s.identity, s.thread, s.episodes, s.priors].filter(x => x.length).length + '/4 tiers';
+    if (activeTab === 'mem') tabInfo.textContent = [s.identity, s.thread, s.episodes, s.priors].filter(x => x.length).length + '/4 tiers';
 
     // Web memory
     webMemCount.textContent = webEntries.length + '/12';
@@ -634,66 +660,6 @@ function fmtIcp(e8s) {
   return (n / 1e8).toFixed(4);
 }
 
-function toggleWalletPanel() {
-  if (!walletVerified) {
-    walletConnect();
-    return;
-  }
-  walletPanelOpen = !walletPanelOpen;
-  walletPanel.classList.toggle('show', walletPanelOpen);
-  walletToggleBtn.classList.toggle('active', walletPanelOpen);
-  if (walletPanelOpen && actor) refreshWallet();
-}
-
-async function walletConnect() {
-  if (!actor || !identity) return toast('Connect a wallet first');
-  walletToggleBtn.disabled = true;
-  walletToggleBtn.textContent = 'Verifying NFT...';
-  walletQuickBal.textContent = '';
-  try {
-    const r = await actor.wallet_connect();
-    if (r?.Ok != null) {
-      walletVerified = true;
-      walletToggleBtn.textContent = 'Bot Wallet';
-      walletToggleBtn.disabled = false;
-      toast(r.Ok);
-      refreshWallet();
-      // Auto-open panel after first verify
-      walletPanelOpen = true;
-      walletPanel.classList.add('show');
-      walletToggleBtn.classList.add('active');
-    } else {
-      walletToggleBtn.textContent = 'Verify NFT';
-      walletToggleBtn.disabled = false;
-      walletQuickBal.textContent = '';
-      toast(r?.Err || 'NFT verification failed');
-    }
-  } catch (e) {
-    walletToggleBtn.textContent = 'Verify NFT';
-    walletToggleBtn.disabled = false;
-    toast('Verification failed: ' + (e?.message || e));
-  }
-}
-
-async function checkWalletOwner() {
-  if (!actor || !identity) return;
-  try {
-    const isOwner = await actor.is_wallet_owner();
-    walletVerified = isOwner;
-    if (isOwner) {
-      walletToggleBtn.textContent = 'Bot Wallet';
-      refreshWallet();
-    } else {
-      walletToggleBtn.textContent = 'Verify NFT';
-      walletQuickBal.textContent = '';
-    }
-  } catch {
-    walletVerified = false;
-    walletToggleBtn.textContent = 'Verify NFT';
-    walletQuickBal.textContent = '';
-  }
-}
-
 async function refreshWallet() {
   if (!actor || !identity) return;
   try {
@@ -703,7 +669,7 @@ async function refreshWallet() {
       actor.wallet_tx_history(BigInt(50)).catch(() => []),
     ]);
     walletAvailable.textContent = fmtIcp(bal.available_e8s) + ' ICP';
-    walletQuickBal.textContent = fmtIcp(bal.available_e8s) + ' ICP';
+    tabInfo.textContent = fmtIcp(bal.available_e8s) + ' ICP';
     walletPending.textContent = fmtIcp(bal.pending_e8s);
     walletTotalIn.textContent = fmtIcp(bal.total_deposited_e8s);
     walletTotalOut.textContent = fmtIcp(bal.total_withdrawn_e8s);
@@ -766,7 +732,34 @@ async function notifyDeposit() {
     walletStatus.textContent = '';
   }
   btn.disabled = false;
-  btn.textContent = 'Check Deposit';
+  btn.textContent = 'Check External Deposit';
+}
+
+async function depositIcp() {
+  if (!actor || !identity) return toast('Connect a wallet first');
+  if (authProvider !== 'plug' || !window.ic?.plug) return toast('Deposit requires Plug wallet');
+  const input = document.getElementById('depositAmountInput').value.trim();
+  const amount = parseFloat(input);
+  if (isNaN(amount) || amount <= 0) return toast('Enter a valid amount');
+  const e8s = Math.round(amount * 1e8);
+  const addr = walletDepositAddr.textContent;
+  if (!addr || addr === 'loading...') return toast('Loading deposit address...');
+  const btn = document.getElementById('depositBtn');
+  btn.disabled = true;
+  btn.textContent = 'Sending...';
+  try {
+    await window.ic.plug.requestTransfer({ to: addr, amount: e8s });
+    toast('Transfer sent! Sweeping...');
+    const r = await actor.wallet_notify_deposit();
+    if (r?.Ok) toast(r.Ok);
+    else toast(r?.Err || 'Sweep pending — try Check Deposit later');
+    document.getElementById('depositAmountInput').value = '';
+    await refreshWallet();
+  } catch (e) {
+    toast('Deposit failed: ' + (e?.message || e));
+  }
+  btn.disabled = false;
+  btn.textContent = 'Deposit';
 }
 
 async function withdrawIcp() {
@@ -807,9 +800,9 @@ async function withdrawIcp() {
 window._pc = {
   sendMessage, loadHistory, handleKey, autoResize, stopQueue,
   toggleAuthDropdown, loginII, loginPlug,
-  toggleMemPanel, refreshMemory, triggerCompress, clearMemory,
+  switchTab, refreshMemory, triggerCompress, clearMemory,
   openSettings, closeSettings, saveProfile, setDevMode, toggleKeyEdit,
-  toggleWalletPanel, walletConnect, copyDepositAddr, notifyDeposit, withdrawIcp,
+  depositIcp, copyDepositAddr, notifyDeposit, withdrawIcp,
 };
 
 // ── Init ─────────────────────────────────────────────────────────────
@@ -823,9 +816,19 @@ await initAuth();
 syncSend();
 checkHealth();
 if (identity) {
-  loadProfile();
-  refreshMemory();
-  checkWalletOwner();
+  // Re-verify NFT for returning II sessions
+  try {
+    const r = await actor.wallet_connect();
+    if (r?.Err) {
+      toast('NFT ownership required');
+      await logout();
+    }
+  } catch { await logout(); }
+  if (identity) {
+    loadProfile();
+    refreshMemory();
+    refreshWallet();
+  }
 } else {
   chatArea.innerHTML = '<div class="msg system">Connect a wallet to start chatting.</div>';
 }

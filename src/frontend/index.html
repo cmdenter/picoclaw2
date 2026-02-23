@@ -99,12 +99,15 @@ textarea::placeholder{color:var(--text3)}
 .toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:8px 16px;border-radius:var(--radius);font-size:13px;z-index:200;opacity:0;transition:opacity .3s}
 .toast.show{opacity:1}
 
-/* PicoMem panel */
-.picomem-toggle{display:flex;align-items:center;gap:6px;padding:6px 16px;border-bottom:1px solid var(--border);background:rgba(18,18,26,0.75);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);flex-shrink:0}
-.picomem-toggle button{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
-.picomem-toggle button:hover{border-color:var(--accent);color:var(--accent)}
-.picomem-toggle button.active{background:var(--accent-glow);border-color:var(--accent);color:var(--accent2)}
-.picomem-toggle .mem-label{font-size:11px;color:var(--text3);margin-left:auto}
+/* Panel tabs */
+.panel-tabs{display:none;align-items:center;gap:6px;padding:6px 16px;border-bottom:1px solid var(--border);background:rgba(18,18,26,0.75);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);flex-shrink:0}
+.panel-tabs.authed{display:flex}
+.panel-tabs button{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+.panel-tabs button:hover{border-color:var(--accent);color:var(--accent)}
+.panel-tabs button.active-mem{background:var(--accent-glow);border-color:var(--accent);color:var(--accent2)}
+.panel-tabs button.active-wallet{background:rgba(0,230,118,.1);border-color:var(--green);color:var(--green)}
+.panel-tabs button.active-wallet:hover{border-color:var(--green);color:var(--green)}
+.panel-tabs .tab-info{font-size:11px;color:var(--text3);margin-left:auto;font-family:'SF Mono',Menlo,monospace}
 .picomem{display:none;flex-direction:column;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg);max-height:45dvh;overflow-y:auto;flex-shrink:0}
 .picomem.show{display:flex}
 .picomem::-webkit-scrollbar{width:4px}
@@ -128,12 +131,6 @@ textarea::placeholder{color:var(--text3)}
 .picomem-ts{font-size:10px;color:var(--text3);margin-left:auto;align-self:center}
 
 /* Wallet panel */
-.wallet-toggle{display:none;align-items:center;gap:6px;padding:6px 16px;border-bottom:1px solid var(--border);background:rgba(18,18,26,0.75);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);flex-shrink:0}
-.wallet-toggle.authed{display:flex}
-.wallet-toggle button{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
-.wallet-toggle button:hover{border-color:var(--green);color:var(--green)}
-.wallet-toggle button.active{background:rgba(0,230,118,.1);border-color:var(--green);color:var(--green)}
-.wallet-toggle .wallet-label{font-size:11px;color:var(--text3);margin-left:auto;font-family:'SF Mono',Menlo,monospace}
 .wallet-panel{display:none;flex-direction:column;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg);max-height:50dvh;overflow-y:auto;flex-shrink:0}
 .wallet-panel.show{display:flex}
 .wallet-panel::-webkit-scrollbar{width:4px}
@@ -268,9 +265,10 @@ textarea::placeholder{color:var(--text3)}
     <div class="stat">Cost: <b id="statCost">-</b></div>
   </div>
 
-  <div class="picomem-toggle">
-    <button id="memToggleBtn" onclick="window._pc.toggleMemPanel()">PicoMem</button>
-    <span class="mem-label" id="memStatus"></span>
+  <div class="panel-tabs" id="panelTabs">
+    <button id="memTabBtn" onclick="window._pc.switchTab('mem')">PicoMem</button>
+    <button id="walletTabBtn" onclick="window._pc.switchTab('wallet')">Wallet</button>
+    <span class="tab-info" id="tabInfo"></span>
   </div>
 
   <div class="picomem" id="memPanel">
@@ -306,10 +304,6 @@ textarea::placeholder{color:var(--text3)}
     </div>
   </div>
 
-  <div class="wallet-toggle" id="walletToggleBar">
-    <button id="walletToggleBtn" onclick="window._pc.toggleWalletPanel()">Bot Wallet</button>
-    <span class="wallet-label" id="walletQuickBal">0.0000 ICP</span>
-  </div>
 
   <div class="wallet-panel" id="walletPanel">
     <div class="wallet-balance-card">
@@ -325,14 +319,21 @@ textarea::placeholder{color:var(--text3)}
 
     <div class="wallet-section">
       <div class="wallet-section-title">Deposit</div>
-      <div class="wallet-addr">
-        <code id="walletDepositAddr">loading...</code>
-        <button onclick="window._pc.copyDepositAddr()" title="Copy address">Copy</button>
+      <div class="wallet-withdraw-row">
+        <input type="text" id="depositAmountInput" placeholder="Amount in ICP (e.g. 0.1)" inputmode="decimal">
+        <button class="wallet-action-btn primary" onclick="window._pc.depositIcp()" id="depositBtn">Deposit</button>
       </div>
-      <div style="margin-top:8px;text-align:center">
-        <button class="wallet-action-btn primary" onclick="window._pc.notifyDeposit()" id="notifyDepositBtn">Check Deposit</button>
-      </div>
-      <div class="wallet-fee-note">Send ICP to the address above, then click "Check Deposit" to credit your balance. Fee: 0.0001 ICP</div>
+      <div class="wallet-fee-note">Sends ICP via Plug to your bot wallet. Fee: 0.0001 ICP</div>
+      <details style="margin-top:6px">
+        <summary style="font-size:10px;color:var(--text3);cursor:pointer">External deposit address</summary>
+        <div class="wallet-addr" style="margin-top:4px">
+          <code id="walletDepositAddr">loading...</code>
+          <button onclick="window._pc.copyDepositAddr()" title="Copy address">Copy</button>
+        </div>
+        <div style="margin-top:4px;text-align:center">
+          <button class="wallet-action-btn" onclick="window._pc.notifyDeposit()" id="notifyDepositBtn" style="font-size:10px">Check External Deposit</button>
+        </div>
+      </details>
     </div>
 
     <div class="wallet-section">
