@@ -160,6 +160,16 @@ textarea::placeholder{color:var(--text3)}
 .settings-cancel{padding:10px 16px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:14px;cursor:pointer;transition:all .15s}
 .settings-cancel:hover{border-color:var(--text2);color:var(--text)}
 
+/* API key settings */
+.key-divider{height:1px;background:var(--border);margin:16px 0}
+.key-row{display:flex;align-items:center;gap:8px;margin-top:6px}
+.key-hint{font-family:'SF Mono',Menlo,monospace;font-size:13px;color:var(--text2);background:var(--surface2);padding:4px 8px;border-radius:var(--radius-sm);letter-spacing:1px}
+.key-change-btn{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:12px;font-weight:600;cursor:pointer;transition:all .15s}
+.key-change-btn:hover{border-color:var(--accent);color:var(--accent)}
+.key-edit{display:none;margin-top:8px}
+.key-edit.show{display:block}
+.key-info{font-size:11px;color:var(--text3);margin-top:8px}
+
 /* NFT grid */
 .nft-grid{display:grid;grid-template-columns:repeat(auto-fill,64px);gap:8px;max-height:240px;overflow-y:auto;padding:4px;min-height:64px;background:var(--surface2);border-radius:var(--radius-sm);border:1px solid var(--border)}
 .nft-grid::-webkit-scrollbar{width:4px}
@@ -289,6 +299,16 @@ textarea::placeholder{color:var(--text3)}
     </div>
     <label class="settings-label">Or paste image URL</label>
     <input class="settings-input" id="customAvatarUrl" maxlength="256" placeholder="https://...">
+    <div class="key-divider"></div>
+    <label class="settings-label">API Key</label>
+    <div class="key-row">
+      <span class="key-hint" id="keyHint">loading...</span>
+      <button class="key-change-btn" id="keyChangeBtn" onclick="window._pc.toggleKeyEdit()">Change</button>
+    </div>
+    <div class="key-edit" id="keyEdit">
+      <input class="settings-input" type="password" id="apiKeyInput" maxlength="256" placeholder="Paste new API key...">
+    </div>
+    <div class="key-info" id="modelDisplay"></div>
     <div class="settings-actions">
       <button class="settings-save" onclick="window._pc.saveProfile()">Save</button>
       <button class="settings-cancel" onclick="window._pc.closeSettings()">Cancel</button>

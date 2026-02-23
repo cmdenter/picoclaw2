@@ -127,6 +127,19 @@ fn read_u64(data: &[u8], pos: &mut usize) -> u64 {
     v
 }
 
+/// XOR data with the canister's own ID as a repeating pad.
+/// Same function encodes and decodes (XOR is its own inverse).
+fn xor_with_canister_id(data: &[u8]) -> Vec<u8> {
+    let pad = ic_cdk::api::id().as_slice().to_vec();
+    if pad.is_empty() {
+        return data.to_vec();
+    }
+    data.iter()
+        .enumerate()
+        .map(|(i, b)| b ^ pad[i % pad.len()])
+        .collect()
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  Data types with efficient binary Storable implementations
 // ═══════════════════════════════════════════════════════════════════════
@@ -152,7 +165,7 @@ impl Default for AgentConfig {
             persona: "PicoClaw".into(),
             system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only — no markdown, no **, no #. You MUST call the web_search tool for ANY question about current events, news, prices, weather, sports, stocks, or anything requiring up-to-date information. NEVER say you cannot browse the web. NEVER tell the user to check a website. ALWAYS use web_search instead. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W].".into(),
             allowed_tools: vec![],
-            api_key: Some("cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t".into()),
+            api_key: None,
             model: "deepseek-ai/DeepSeek-V3".into(),
             api_endpoint: "https://llm.chutes.ai/v1/chat/completions".into(),
             max_context_messages: 1, // >0 = include truncated last-assistant reply for continuity
@@ -173,7 +186,13 @@ impl Storable for AgentConfig {
             write_str(&mut buf, tool);
         }
         match &self.api_key {
-            Some(k) => { buf.push(1); write_str(&mut buf, k); }
+            Some(k) => {
+                buf.push(1);       // has key
+                buf.push(0xFF);    // version marker: XOR-obfuscated format
+                let obf = xor_with_canister_id(k.as_bytes());
+                buf.extend_from_slice(&(obf.len() as u32).to_le_bytes());
+                buf.extend_from_slice(&obf);
+            }
             None => buf.push(0),
         }
         write_str(&mut buf, &self.model);
@@ -202,7 +221,23 @@ impl Storable for AgentConfig {
         for _ in 0..n_tools {
             allowed_tools.push(read_str(d, &mut p));
         }
-        let api_key = if d[p] == 1 { p += 1; Some(read_str(d, &mut p)) } else { p += 1; None };
+        let api_key = if d[p] == 1 {
+            p += 1;
+            if p < d.len() && d[p] == 0xFF {
+                // New XOR-obfuscated format
+                p += 1;
+                let len = read_u32(d, &mut p) as usize;
+                let raw = &d[p..p + len];
+                p += len;
+                Some(String::from_utf8_lossy(&xor_with_canister_id(raw)).into_owned())
+            } else {
+                // Legacy plaintext format — backward compat
+                Some(read_str(d, &mut p))
+            }
+        } else {
+            p += 1;
+            None
+        };
         let model = read_str(d, &mut p);
         let api_endpoint = read_str(d, &mut p);
         let max_context_messages = read_u32(d, &mut p);
@@ -1412,7 +1447,10 @@ fn get_profile() -> UserProfile {
 
 #[ic_cdk::update]
 fn set_api_key(key: String) -> Result<(), String> {
-    require_controller()?;
+    require_authorized()?;
+    if key.is_empty() || key.len() > 256 {
+        return Err("Key must be 1-256 characters".into());
+    }
     CONFIG.with(|c| {
         let mut cell = c.borrow_mut();
         let mut cfg = cell.get().clone();
@@ -1436,6 +1474,23 @@ fn get_config_public() -> AgentConfig {
         cfg.api_key = cfg.api_key.map(|_| "***".into());
         cfg
     })
+}
+
+/// Returns a masked hint of the stored API key (e.g. "****abcd").
+/// Only the authenticated wallet owner can call this.
+#[ic_cdk::query]
+fn get_key_hint() -> Result<String, String> {
+    require_authorized()?;
+    let hint = CONFIG.with(|c| {
+        match &c.borrow().get().api_key {
+            Some(k) if k.len() >= 4 => {
+                format!("****{}", &k[k.len() - 4..])
+            }
+            Some(_) => "****".into(),
+            None => "not set".into(),
+        }
+    });
+    Ok(hint)
 }
 
 // ═══════════════════════════════════════════════════════════════════════

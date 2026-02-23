@@ -31,6 +31,11 @@ const profileNameInput = document.getElementById('profileName');
 const nftGrid     = document.getElementById('nftGrid');
 const customAvatarInput = document.getElementById('customAvatarUrl');
 const nftBg       = document.getElementById('nftBg');
+const keyHint     = document.getElementById('keyHint');
+const keyChangeBtn = document.getElementById('keyChangeBtn');
+const keyEdit     = document.getElementById('keyEdit');
+const apiKeyInput = document.getElementById('apiKeyInput');
+const modelDisplay = document.getElementById('modelDisplay');
 
 // ── Defaults ─────────────────────────────────────────────────────────
 const DEFAULT_AVATAR = 'https://5movr-diaaa-aaaak-aaftq-cai.raw.icp0.io/?type=thumbnail&tokenid=cgymy-lqkor-uwiaa-aaaaa-cqabm-4aqca-aabyj-q';
@@ -502,6 +507,15 @@ function openSettings() {
   settingsModal.classList.add('show');
   profileNameInput.value = clawName.textContent === 'PicoClaw' ? '' : clawName.textContent;
   customAvatarInput.value = selectedNftUrl;
+  // Reset key edit state
+  keyEdit.classList.remove('show');
+  keyChangeBtn.textContent = 'Change';
+  apiKeyInput.value = '';
+  // Load key hint + config info
+  loadKeyHint();
+  actor.get_config_public().then(cfg => {
+    modelDisplay.textContent = 'Model: ' + cfg.model + '  |  Endpoint: ' + cfg.api_endpoint;
+  }).catch(() => {});
   // Load NFTs if Plug is connected
   if (authProvider === 'plug' && window.ic?.plug) {
     loadUserNFTs();
@@ -528,11 +542,38 @@ function selectNft(url) {
   }
 }
 
+async function loadKeyHint() {
+  if (!actor || !identity) return;
+  try {
+    const r = await actor.get_key_hint();
+    keyHint.textContent = r?.Ok || 'not set';
+  } catch {
+    keyHint.textContent = 'unavailable';
+  }
+}
+
+function toggleKeyEdit() {
+  keyEdit.classList.toggle('show');
+  if (keyEdit.classList.contains('show')) {
+    apiKeyInput.value = '';
+    apiKeyInput.focus();
+    keyChangeBtn.textContent = 'Cancel';
+  } else {
+    keyChangeBtn.textContent = 'Change';
+  }
+}
+
 async function saveProfile() {
   if (!actor || !identity) return toast('Not connected');
   const name = profileNameInput.value.trim() || 'PicoClaw';
   const url = customAvatarInput.value.trim();
+  const newKey = apiKeyInput.value.trim();
   try {
+    // Save API key if user entered one
+    if (newKey) {
+      const kr = await actor.set_api_key(newKey);
+      if (kr?.Err != null) return toast('Key error: ' + kr.Err);
+    }
     const r = await actor.set_profile(name, url);
     if (r?.Err != null) return toast('Error: ' + r.Err);
     // Update header
@@ -549,7 +590,7 @@ async function saveProfile() {
     }
     setNftBackground(url);
     closeSettings();
-    toast('Profile saved');
+    toast(newKey ? 'Profile & key saved' : 'Profile saved');
   } catch (e) {
     toast('Save failed: ' + (e?.message || e));
   }
@@ -565,7 +606,7 @@ window._pc = {
   sendMessage, loadHistory, handleKey, autoResize, stopQueue,
   toggleAuthDropdown, loginII, loginPlug,
   toggleMemPanel, refreshMemory, triggerCompress, clearMemory,
-  openSettings, closeSettings, saveProfile, setDevMode,
+  openSettings, closeSettings, saveProfile, setDevMode, toggleKeyEdit,
 };
 
 // ── Init ─────────────────────────────────────────────────────────────
