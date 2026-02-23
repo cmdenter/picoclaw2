@@ -80,6 +80,10 @@ header{display:flex;align-items:center;justify-content:space-between;padding:12p
 
 /* Input area */
 .input-area{padding:12px 16px;border-top:1px solid var(--border);background:rgba(18,18,26,0.85);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);flex-shrink:0}
+.input-hints{display:flex;gap:6px;margin-bottom:6px}
+.hint-btn{padding:3px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text3);font-size:11px;font-weight:600;font-family:'SF Mono',Menlo,monospace;cursor:pointer;transition:all .15s}
+.hint-btn:hover{border-color:var(--accent);color:var(--accent)}
+.hint-btn.active{background:var(--green);border-color:var(--green);color:#000}
 .input-row{display:flex;gap:8px;align-items:flex-end}
 textarea{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);padding:10px 14px;font-size:14px;font-family:inherit;resize:none;min-height:44px;max-height:120px;line-height:1.4;outline:none;transition:border-color .15s}
 textarea:focus{border-color:var(--accent)}
@@ -254,6 +258,9 @@ textarea::placeholder{color:var(--text3)}
   <div class="typing" id="typing"><span></span><span></span><span></span></div>
 
   <div class="input-area">
+    <div class="input-hints" id="inputHints">
+      <button class="hint-btn" onclick="window._pc.setDevMode()" id="devModeBtn" title="Dev agent mode — tasks run on server">/dev</button>
+    </div>
     <div class="input-row">
       <textarea id="input" rows="1" placeholder="Message PicoClaw..." onkeydown="window._pc.handleKey(event)" oninput="window._pc.autoResize(this)"></textarea>
       <button class="send-btn stop-btn" id="stopBtn" onclick="window._pc.stopQueue()" style="display:none" title="Stop & clear queue">

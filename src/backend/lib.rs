@@ -689,6 +689,10 @@ fn extract_url(text: &str) -> Option<&str> {
 const PICO_SERVER_URL: &str = "https://smartsui.io/api/intel";
 const PICO_SERVER_KEY: &str = "pico_ca06ade4ccc876a78cb50b7091cd0189ad77984af38f9d8e627214f97a9ef10d";
 
+// ── Dev Agent (Hetzner) ──────────────────────────────────────────────
+const DEV_AGENT_URL: &str = "https://smartsui.io:3847/task";
+const DEV_DEFAULT_REPO: &str = "https://github.com/cmdenter/picoclaw2";
+
 /// Extract the "f" (facts) field from a server /api/intel JSON response.
 fn extract_intel_facts(body: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(body).ok()?;
@@ -1436,12 +1440,52 @@ fn get_config_public() -> AgentConfig {
 //  Core LLM interaction
 // ═══════════════════════════════════════════════════════════════════════
 
+/// Dispatch a dev task to the Hetzner agent via HTTP outcall.
+async fn dispatch_dev_task(task_prompt: &str) -> Result<String, String> {
+    let body_str = format!(
+        r#"{{"repo":"{}","prompt":"{}"}}"#,
+        DEV_DEFAULT_REPO,
+        json_escape(task_prompt)
+    );
+    let request = HttpRequestArgs {
+        url: DEV_AGENT_URL.to_string(),
+        method: HttpMethod::POST,
+        body: Some(body_str.into_bytes()),
+        max_response_bytes: Some(1_000),
+        transform: None,
+        headers: vec![
+            HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
+        ],
+        is_replicated: Some(false),
+    };
+    let response = mgmt_http_request(&request).await
+        .map_err(|e| format!("Dev agent unreachable: {:?}", e))?;
+    let body = String::from_utf8_lossy(&response.body);
+    if body.contains("\"queued\":true") {
+        Ok(format!("Dev task dispatched. The agent is working on: {}", task_prompt))
+    } else {
+        Err(format!("Dev agent error: {}", body))
+    }
+}
+
 #[ic_cdk::update]
 async fn chat(prompt: String) -> Result<String, String> {
     require_authorized()?;
 
     if prompt.len() > MAX_PROMPT_BYTES {
         return Err(format!("Prompt too large: {} bytes (max {})", prompt.len(), MAX_PROMPT_BYTES));
+    }
+
+    // /dev command → dispatch to Hetzner dev agent, skip LLM
+    if prompt.starts_with("/dev ") {
+        let task = &prompt[5..];
+        log_message("user", &prompt);
+        let reply = match dispatch_dev_task(task).await {
+            Ok(msg) => msg,
+            Err(e) => format!("Failed to dispatch dev task: {}", e),
+        };
+        log_message("assistant", &reply);
+        return Ok(reply);
     }
 
     let config = get_config();

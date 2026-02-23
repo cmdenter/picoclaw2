@@ -41,6 +41,8 @@ let authProvider = null;
 let memPanelOpen = false;
 let toastTimer = 0;
 let selectedNftUrl = '';
+let devMode = false;
+const devModeBtn = document.getElementById('devModeBtn');
 
 // ── Message queue (never blocks the send button) ─────────────────────
 const queue = [];
@@ -289,6 +291,13 @@ async function handleToolQuery(text) {
   return null; // no tool matched — fall through to LLM
 }
 
+// ── Dev mode toggle ──────────────────────────────────────────────────
+function setDevMode() {
+  devMode = !devMode;
+  devModeBtn.classList.toggle('active', devMode);
+  inputEl.placeholder = devMode ? '/dev task for coding agent...' : 'Message PicoClaw...';
+}
+
 // ── Chat (queue-based — button never blocks) ────────────────────────
 function sendMessage() {
   const text = inputEl.value.trim();
@@ -299,10 +308,12 @@ function sendMessage() {
   inputEl.value = '';
   inputEl.style.height = 'auto';
 
-  appendMsg('user', text);
+  // In dev mode, prepend /dev so backend dispatches to agent
+  const msg = devMode ? '/dev ' + text : text;
+  appendMsg('user', msg);
   scroll();
 
-  queue.push(text);
+  queue.push(msg);
   drainQueue();
 }
 
@@ -550,7 +561,7 @@ window._pc = {
   sendMessage, loadHistory, handleKey, autoResize, stopQueue,
   toggleAuthDropdown, loginII, loginPlug,
   toggleMemPanel, refreshMemory, triggerCompress, clearMemory,
-  openSettings, closeSettings, saveProfile,
+  openSettings, closeSettings, saveProfile, setDevMode,
 };
 
 // ── Init ─────────────────────────────────────────────────────────────
