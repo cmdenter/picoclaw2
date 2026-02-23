@@ -293,9 +293,11 @@ pub struct UserProfile {
     pub updated_at: u64,
 }
 
+const DEFAULT_AVATAR: &str = "https://5movr-diaaa-aaaak-aaftq-cai.raw.icp0.io/?type=thumbnail&tokenid=cgymy-lqkor-uwiaa-aaaaa-cqabm-4aqca-aabyj-q";
+
 impl Default for UserProfile {
     fn default() -> Self {
-        Self { name: "PicoClaw".into(), avatar_url: String::new(), updated_at: 0 }
+        Self { name: "PicoClaw".into(), avatar_url: DEFAULT_AVATAR.into(), updated_at: 0 }
     }
 }
 

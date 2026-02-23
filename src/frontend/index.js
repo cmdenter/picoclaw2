@@ -32,6 +32,9 @@ const nftGrid     = document.getElementById('nftGrid');
 const customAvatarInput = document.getElementById('customAvatarUrl');
 const nftBg       = document.getElementById('nftBg');
 
+// ── Defaults ─────────────────────────────────────────────────────────
+const DEFAULT_AVATAR = 'https://5movr-diaaa-aaaak-aaftq-cai.raw.icp0.io/?type=thumbnail&tokenid=cgymy-lqkor-uwiaa-aaaaa-cqabm-4aqca-aabyj-q';
+
 // ── State ────────────────────────────────────────────────────────────
 let actor = picoclaw;
 let authClient = null;
@@ -189,12 +192,13 @@ async function logout() {
   syncSend();
   statusDot.className = 'status-dot';
   chatArea.innerHTML = '<div class="msg system">Session ended. Connect to start chatting.</div>';
-  // Reset avatar, name, and background
+  // Reset to default avatar and background
   clawName.textContent = 'PicoClaw';
-  avatarImg.style.display = 'none';
-  avatarSvg.style.display = '';
-  selectedNftUrl = '';
-  setNftBackground('');
+  avatarImg.src = DEFAULT_AVATAR;
+  avatarImg.style.display = '';
+  avatarSvg.style.display = 'none';
+  selectedNftUrl = DEFAULT_AVATAR;
+  setNftBackground(DEFAULT_AVATAR);
   toast('Disconnected');
 }
 
@@ -565,6 +569,12 @@ window._pc = {
 };
 
 // ── Init ─────────────────────────────────────────────────────────────
+// Show default avatar + background immediately
+avatarImg.src = DEFAULT_AVATAR;
+avatarImg.style.display = '';
+avatarSvg.style.display = 'none';
+setNftBackground(DEFAULT_AVATAR);
+
 await initAuth();
 syncSend();
 checkHealth();
