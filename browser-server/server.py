@@ -25,10 +25,7 @@ from scrapling.fetchers import Fetcher, StealthyFetcher
 
 app = FastAPI(title="PicoClaw Browser Server")
 
-CHUTES_KEY = os.getenv(
-    "CHUTES_API_KEY",
-    "cpk_c3137eff6f414dabbdb4321ef4d76338.c664f41005b754f78d67821cdf12075d.5IMBvgCGG0BY7Nyd1xS2Dg3jaHt5kf9t",
-)
+CHUTES_KEY = os.getenv("CHUTES_API_KEY", "")
 CHUTES_URL = "https://llm.chutes.ai/v1/chat/completions"
 MODEL = "deepseek-ai/DeepSeek-V3"
 SYSTEM = (
@@ -41,11 +38,11 @@ SYSTEM = (
 )
 
 # Canister API key
-CANISTER_API_KEY = os.getenv("CANISTER_API_KEY", "pico_ca06ade4ccc876a78cb50b7091cd0189ad77984af38f9d8e627214f97a9ef10d")
+CANISTER_API_KEY = os.getenv("CANISTER_API_KEY", "")
 
 # Auth
-AUTH_USER = "markcryer"
-AUTH_PASS_HASH = hashlib.sha256("Amazonkindle1".encode()).hexdigest()
+AUTH_USER = os.getenv("AUTH_USER", "admin")
+AUTH_PASS_HASH = os.getenv("AUTH_PASS_HASH", hashlib.sha256(os.getenv("AUTH_PASS", "changeme").encode()).hexdigest())
 _sessions: dict[str, float] = {}
 
 # Activity log
