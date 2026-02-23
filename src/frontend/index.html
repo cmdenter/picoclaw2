@@ -127,6 +127,51 @@ textarea::placeholder{color:var(--text3)}
 .picomem-actions button.danger:hover{border-color:var(--red);color:var(--red)}
 .picomem-ts{font-size:10px;color:var(--text3);margin-left:auto;align-self:center}
 
+/* Wallet panel */
+.wallet-toggle{display:none;align-items:center;gap:6px;padding:6px 16px;border-bottom:1px solid var(--border);background:rgba(18,18,26,0.75);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);flex-shrink:0}
+.wallet-toggle.authed{display:flex}
+.wallet-toggle button{padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s}
+.wallet-toggle button:hover{border-color:var(--green);color:var(--green)}
+.wallet-toggle button.active{background:rgba(0,230,118,.1);border-color:var(--green);color:var(--green)}
+.wallet-toggle .wallet-label{font-size:11px;color:var(--text3);margin-left:auto;font-family:'SF Mono',Menlo,monospace}
+.wallet-panel{display:none;flex-direction:column;gap:10px;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg);max-height:50dvh;overflow-y:auto;flex-shrink:0}
+.wallet-panel.show{display:flex}
+.wallet-panel::-webkit-scrollbar{width:4px}
+.wallet-panel::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.wallet-balance-card{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface)}
+.wallet-balance-main{grid-column:1/-1;text-align:center;padding:4px 0 8px}
+.wallet-balance-value{font-size:24px;font-weight:700;font-family:'SF Mono',Menlo,monospace;color:var(--green)}
+.wallet-balance-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-top:2px}
+.wallet-stat{text-align:center}
+.wallet-stat .val{font-size:13px;font-weight:600;color:var(--text);font-family:'SF Mono',Menlo,monospace}
+.wallet-stat .lbl{font-size:10px;color:var(--text3)}
+.wallet-section{border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface);padding:10px}
+.wallet-section-title{font-size:11px;font-weight:700;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
+.wallet-addr{display:flex;align-items:center;gap:6px}
+.wallet-addr code{flex:1;font-size:11px;font-family:'SF Mono',Menlo,monospace;color:var(--text);background:var(--surface2);padding:6px 8px;border-radius:var(--radius-sm);border:1px solid var(--border);word-break:break-all;line-height:1.4}
+.wallet-addr button,.wallet-action-btn{padding:6px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:transparent;color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;white-space:nowrap}
+.wallet-addr button:hover,.wallet-action-btn:hover{border-color:var(--green);color:var(--green)}
+.wallet-action-btn.primary{border-color:var(--green);color:var(--green)}
+.wallet-action-btn.primary:hover{background:rgba(0,230,118,.1)}
+.wallet-action-btn:disabled{opacity:.3;cursor:not-allowed}
+.wallet-withdraw-row{display:flex;gap:6px;align-items:center;margin-top:6px}
+.wallet-withdraw-row input{flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:6px 8px;font-size:13px;font-family:'SF Mono',Menlo,monospace;outline:none}
+.wallet-withdraw-row input:focus{border-color:var(--green)}
+.wallet-fee-note{font-size:10px;color:var(--text3);margin-top:4px}
+.wallet-tx-list{max-height:160px;overflow-y:auto}
+.wallet-tx-list::-webkit-scrollbar{width:3px}
+.wallet-tx-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.wallet-tx-item{display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border);font-size:11px}
+.wallet-tx-item:last-child{border-bottom:none}
+.wallet-tx-type{font-weight:700;font-size:10px;padding:2px 6px;border-radius:4px;letter-spacing:.5px}
+.wallet-tx-type.deposit{background:rgba(0,230,118,.12);color:var(--green)}
+.wallet-tx-type.withdraw{background:rgba(255,82,82,.1);color:var(--red)}
+.wallet-tx-type.failed{background:rgba(255,171,64,.12);color:var(--orange)}
+.wallet-tx-amount{font-family:'SF Mono',Menlo,monospace;color:var(--text);font-weight:600}
+.wallet-tx-time{color:var(--text3);margin-left:auto;font-size:10px}
+.wallet-tx-empty{color:var(--text3);font-size:12px;font-style:italic;padding:8px 0}
+.wallet-status{font-size:11px;color:var(--text2);text-align:center;padding:4px 0}
+
 /* Auth */
 .auth-bar{display:flex;align-items:center;gap:6px;position:relative}
 .auth-btn{padding:6px 12px;border-radius:var(--radius-sm);font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--accent);background:transparent;color:var(--accent);transition:all .15s}
@@ -259,6 +304,54 @@ textarea::placeholder{color:var(--text3)}
       <button class="danger" onclick="window._pc.clearMemory()" id="clearMemBtn">Clear Memory</button>
       <span class="picomem-ts" id="memTs"></span>
     </div>
+  </div>
+
+  <div class="wallet-toggle" id="walletToggleBar">
+    <button id="walletToggleBtn" onclick="window._pc.toggleWalletPanel()">Bot Wallet</button>
+    <span class="wallet-label" id="walletQuickBal">0.0000 ICP</span>
+  </div>
+
+  <div class="wallet-panel" id="walletPanel">
+    <div class="wallet-balance-card">
+      <div class="wallet-balance-main">
+        <div class="wallet-balance-value" id="walletAvailable">0.0000 ICP</div>
+        <div class="wallet-balance-label">Available Balance</div>
+      </div>
+      <div class="wallet-stat"><div class="val" id="walletPending">0.0000</div><div class="lbl">Pending</div></div>
+      <div class="wallet-stat"><div class="val" id="walletTotalIn">0.0000</div><div class="lbl">Total In</div></div>
+      <div class="wallet-stat"><div class="val" id="walletTotalOut">0.0000</div><div class="lbl">Total Out</div></div>
+      <div class="wallet-stat"><div class="val" id="walletTxCount">0</div><div class="lbl">Transactions</div></div>
+    </div>
+
+    <div class="wallet-section">
+      <div class="wallet-section-title">Deposit</div>
+      <div class="wallet-addr">
+        <code id="walletDepositAddr">loading...</code>
+        <button onclick="window._pc.copyDepositAddr()" title="Copy address">Copy</button>
+      </div>
+      <div style="margin-top:8px;text-align:center">
+        <button class="wallet-action-btn primary" onclick="window._pc.notifyDeposit()" id="notifyDepositBtn">Check Deposit</button>
+      </div>
+      <div class="wallet-fee-note">Send ICP to the address above, then click "Check Deposit" to credit your balance. Fee: 0.0001 ICP</div>
+    </div>
+
+    <div class="wallet-section">
+      <div class="wallet-section-title">Withdraw</div>
+      <div class="wallet-withdraw-row">
+        <input type="text" id="withdrawAmountInput" placeholder="Amount in ICP (e.g. 0.5)" inputmode="decimal">
+        <button class="wallet-action-btn primary" onclick="window._pc.withdrawIcp()" id="withdrawBtn">Withdraw</button>
+      </div>
+      <div class="wallet-fee-note">Network fee: 0.0001 ICP deducted from balance</div>
+    </div>
+
+    <div class="wallet-section">
+      <div class="wallet-section-title">Recent Transactions</div>
+      <div class="wallet-tx-list" id="walletTxList">
+        <div class="wallet-tx-empty">No transactions yet</div>
+      </div>
+    </div>
+
+    <div class="wallet-status" id="walletStatus"></div>
   </div>
 
   <div class="chat-area" id="chatArea">

@@ -489,6 +489,188 @@ impl Storable for QueuedTask {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  Wallet types — per-user ICP balance + transaction history
+// ═══════════════════════════════════════════════════════════════════════
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct UserBalance {
+    pub available_e8s: u64,
+    pub pending_e8s: u64,
+    pub total_deposited_e8s: u64,
+    pub total_withdrawn_e8s: u64,
+    pub tx_count: u64,
+    pub updated_at: u64,
+}
+
+impl Default for UserBalance {
+    fn default() -> Self {
+        Self { available_e8s: 0, pending_e8s: 0, total_deposited_e8s: 0, total_withdrawn_e8s: 0, tx_count: 0, updated_at: 0 }
+    }
+}
+
+impl Storable for UserBalance {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = Vec::with_capacity(48);
+        buf.extend_from_slice(&self.available_e8s.to_le_bytes());
+        buf.extend_from_slice(&self.pending_e8s.to_le_bytes());
+        buf.extend_from_slice(&self.total_deposited_e8s.to_le_bytes());
+        buf.extend_from_slice(&self.total_withdrawn_e8s.to_le_bytes());
+        buf.extend_from_slice(&self.tx_count.to_le_bytes());
+        buf.extend_from_slice(&self.updated_at.to_le_bytes());
+        Cow::Owned(buf)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let d = bytes.as_ref();
+        Self {
+            available_e8s: u64::from_le_bytes(d[0..8].try_into().unwrap()),
+            pending_e8s: u64::from_le_bytes(d[8..16].try_into().unwrap()),
+            total_deposited_e8s: u64::from_le_bytes(d[16..24].try_into().unwrap()),
+            total_withdrawn_e8s: u64::from_le_bytes(d[24..32].try_into().unwrap()),
+            tx_count: u64::from_le_bytes(d[32..40].try_into().unwrap()),
+            updated_at: u64::from_le_bytes(d[40..48].try_into().unwrap()),
+        }
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 48, is_fixed_size: true };
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TxRecord {
+    pub tx_type: u8,       // 0=deposit, 1=withdrawal
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub block_height: u64,
+    pub timestamp: u64,
+    pub status: u8,        // 0=pending, 1=confirmed, 2=failed
+}
+
+impl Storable for TxRecord {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = Vec::with_capacity(34);
+        buf.push(self.tx_type);
+        buf.extend_from_slice(&self.amount_e8s.to_le_bytes());
+        buf.extend_from_slice(&self.fee_e8s.to_le_bytes());
+        buf.extend_from_slice(&self.block_height.to_le_bytes());
+        buf.extend_from_slice(&self.timestamp.to_le_bytes());
+        buf.push(self.status);
+        Cow::Owned(buf)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let d = bytes.as_ref();
+        let mut p = 0;
+        let tx_type = d[p]; p += 1;
+        let amount_e8s = u64::from_le_bytes(d[p..p+8].try_into().unwrap()); p += 8;
+        let fee_e8s = u64::from_le_bytes(d[p..p+8].try_into().unwrap()); p += 8;
+        let block_height = u64::from_le_bytes(d[p..p+8].try_into().unwrap()); p += 8;
+        let timestamp = u64::from_le_bytes(d[p..p+8].try_into().unwrap()); p += 8;
+        let status = d[p];
+        Self { tx_type, amount_e8s, fee_e8s, block_height, timestamp, status }
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 34, is_fixed_size: true };
+}
+
+/// Fixed-size key wrapper for Principal (1 byte length + up to 29 bytes, padded to 30).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StorablePrincipal(pub Principal);
+
+impl Storable for StorablePrincipal {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let pb = self.0.as_slice();
+        let mut buf = [0u8; 30];
+        buf[0] = pb.len() as u8;
+        buf[1..1 + pb.len()].copy_from_slice(pb);
+        Cow::Owned(buf.to_vec())
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let d = bytes.as_ref();
+        let len = d[0] as usize;
+        Self(Principal::from_slice(&d[1..1 + len]))
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 30, is_fixed_size: true };
+}
+
+/// Composite key for tx history: principal (30 bytes) + tx_index (8 bytes big-endian for sort).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TxKey {
+    pub principal: StorablePrincipal,
+    pub tx_index: u64,
+}
+
+impl Storable for TxKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = Vec::with_capacity(38);
+        let pb = self.principal.0.as_slice();
+        let mut principal_buf = [0u8; 30];
+        principal_buf[0] = pb.len() as u8;
+        principal_buf[1..1 + pb.len()].copy_from_slice(pb);
+        buf.extend_from_slice(&principal_buf);
+        buf.extend_from_slice(&self.tx_index.to_be_bytes()); // big-endian for sort order
+        Cow::Owned(buf)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let d = bytes.as_ref();
+        let len = d[0] as usize;
+        let principal = StorablePrincipal(Principal::from_slice(&d[1..1 + len]));
+        let tx_index = u64::from_be_bytes(d[30..38].try_into().unwrap());
+        Self { principal, tx_index }
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 38, is_fixed_size: true };
+}
+
+// ── ICRC-1 Candid types (hand-rolled, no ledger crate needed) ──────────
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Icrc1Account {
+    pub owner: Principal,
+    pub subaccount: Option<[u8; 32]>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Icrc1TransferArgs {
+    pub from_subaccount: Option<[u8; 32]>,
+    pub to: Icrc1Account,
+    pub amount: candid::Nat,
+    pub fee: Option<candid::Nat>,
+    pub memo: Option<Vec<u8>>,
+    pub created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum Icrc1TransferError {
+    BadFee { expected_fee: candid::Nat },
+    BadBurn { min_burn_amount: candid::Nat },
+    InsufficientFunds { balance: candid::Nat },
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+    Duplicate { duplicate_of: candid::Nat },
+    TemporarilyUnavailable,
+    GenericError { error_code: candid::Nat, message: String },
+}
+
+// ── EXT NFT types (for ownership verification) ─────────────────────────
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+enum ExtCommonError {
+    InvalidToken(String),
+    Other(String),
+}
+
+/// EXT bearer result — Motoko uses lowercase ok/err variant labels.
+#[allow(non_camel_case_types)]
+#[derive(CandidType, Deserialize, Debug, Clone)]
+enum ExtBearerResult {
+    ok(String),
+    err(ExtCommonError),
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  Stable state
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -530,6 +712,22 @@ thread_local! {
     static USER_PROFILE: RefCell<Cell<UserProfile, Memory>> = RefCell::new(
         Cell::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(7))), UserProfile::default())
             .expect("user profile cell init")
+    );
+
+    // Wallet: per-user balances (MemoryId 8) + transaction log (MemoryId 9)
+    static WALLET_BALANCES: RefCell<StableBTreeMap<StorablePrincipal, UserBalance, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(8))))
+    );
+    static WALLET_TX_LOG: RefCell<StableBTreeMap<TxKey, TxRecord, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(9))))
+    );
+
+    // Wallet owner: NFT-verified principal (MemoryId 10). Anonymous = not yet verified.
+    static WALLET_OWNER: RefCell<Cell<StorablePrincipal, Memory>> = RefCell::new(
+        Cell::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(10))),
+            StorablePrincipal(Principal::anonymous())
+        ).expect("wallet owner cell init")
     );
 
     static MSG_COUNTER: RefCell<u64> = RefCell::new(0);
@@ -1407,6 +1605,332 @@ fn principal_to_account_id(principal_text: String) -> Result<String, String> {
     let principal = Principal::from_text(&principal_text)
         .map_err(|e| format!("Invalid principal: {}", e))?;
     Ok(derive_account_id(&principal))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Wallet — per-user ICP balance with deposit/withdraw/history
+// ═══════════════════════════════════════════════════════════════════════
+
+const ICP_LEDGER: Principal = Principal::from_slice(&[0, 0, 0, 0, 0, 0, 0, 2, 1, 1]); // ryjl3-tyaaa-aaaaa-aaaba-cai
+const ICP_FEE_E8S: u64 = 10_000; // 0.0001 ICP
+const NFT_TOKEN_ID: &str = "cgymy-lqkor-uwiaa-aaaaa-cqabm-4aqca-aabyj-q";
+
+/// Derive a unique 32-byte subaccount from a user's principal (SHA-224, zero-padded).
+fn principal_to_subaccount(principal: &Principal) -> [u8; 32] {
+    let hash = sha224(principal.as_slice());
+    let mut sub = [0u8; 32];
+    sub[..28].copy_from_slice(&hash);
+    sub
+}
+
+/// Compute the account ID for a deposit address (canister principal + user subaccount).
+fn derive_deposit_account_id(user: &Principal) -> String {
+    let canister = ic_cdk::api::id();
+    let subaccount = principal_to_subaccount(user);
+    let mut hasher_input = Vec::with_capacity(64);
+    hasher_input.extend_from_slice(b"\x0Aaccount-id");
+    hasher_input.extend_from_slice(canister.as_slice());
+    hasher_input.extend_from_slice(&subaccount);
+    let hash = sha224(&hasher_input);
+    let checksum = crc32(&hash);
+    let mut hex = String::with_capacity(64);
+    for b in checksum.to_be_bytes().iter().chain(hash.iter()) {
+        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{:02x}", b));
+    }
+    hex
+}
+
+/// Get or create a user's wallet balance.
+fn get_user_balance(principal: &Principal) -> UserBalance {
+    WALLET_BALANCES.with(|w| {
+        w.borrow().get(&StorablePrincipal(*principal)).unwrap_or_default()
+    })
+}
+
+/// Persist a user's wallet balance.
+fn set_user_balance(principal: &Principal, balance: UserBalance) {
+    WALLET_BALANCES.with(|w| {
+        w.borrow_mut().insert(StorablePrincipal(*principal), balance);
+    });
+}
+
+/// Log a wallet transaction and return the tx_index used.
+fn log_wallet_tx(principal: &Principal, record: TxRecord) -> u64 {
+    let balance = get_user_balance(principal);
+    let tx_index = balance.tx_count; // 0-indexed, incremented after insert
+    WALLET_TX_LOG.with(|t| {
+        t.borrow_mut().insert(
+            TxKey { principal: StorablePrincipal(*principal), tx_index },
+            record,
+        );
+    });
+    tx_index
+}
+
+/// Check that the caller is the NFT-verified wallet owner.
+fn require_wallet_owner() -> Result<(), String> {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() {
+        return Err("Anonymous calls not allowed".into());
+    }
+    let owner = WALLET_OWNER.with(|w| w.borrow().get().clone());
+    if owner.0 == Principal::anonymous() {
+        return Err("Wallet not activated — verify NFT ownership first".into());
+    }
+    if owner.0 != caller {
+        return Err("Access denied: wallet owner only".into());
+    }
+    Ok(())
+}
+
+/// Returns true if the caller is the verified NFT wallet owner.
+#[ic_cdk::query]
+fn is_wallet_owner() -> bool {
+    let caller = ic_cdk::api::msg_caller();
+    if caller == Principal::anonymous() { return false; }
+    WALLET_OWNER.with(|w| w.borrow().get().0 == caller)
+}
+
+/// Verify NFT ownership via EXT bearer call and activate wallet access.
+#[ic_cdk::update]
+async fn wallet_connect() -> Result<String, String> {
+    require_authorized()?;
+    let caller = ic_cdk::api::msg_caller();
+
+    let nft_canister = Principal::from_text("5movr-diaaa-aaaak-aaftq-cai")
+        .map_err(|e| format!("Invalid NFT canister: {}", e))?;
+
+    let (result,): (ExtBearerResult,) =
+        ic_cdk::call(nft_canister, "bearer", (NFT_TOKEN_ID.to_string(),))
+            .await
+            .map_err(|e| format!("NFT canister call failed: {:?}", e))?;
+
+    let owner_account_id = match result {
+        ExtBearerResult::ok(aid) => aid,
+        ExtBearerResult::err(e) => return Err(format!("NFT lookup failed: {:?}", e)),
+    };
+
+    let caller_account_id = derive_account_id(&caller);
+
+    if owner_account_id != caller_account_id {
+        return Err("Access denied: you do not own this NFT".into());
+    }
+
+    // Store verified wallet owner
+    WALLET_OWNER.with(|w| {
+        let _ = w.borrow_mut().set(StorablePrincipal(caller));
+    });
+
+    Ok("Wallet activated — NFT ownership verified".into())
+}
+
+#[ic_cdk::query]
+fn wallet_balance() -> UserBalance {
+    require_wallet_owner().unwrap_or_else(|e| ic_cdk::trap(&e));
+    let caller = ic_cdk::api::msg_caller();
+    get_user_balance(&caller)
+}
+
+#[ic_cdk::query]
+fn wallet_deposit_address() -> String {
+    require_wallet_owner().unwrap_or_else(|e| ic_cdk::trap(&e));
+    let caller = ic_cdk::api::msg_caller();
+    derive_deposit_account_id(&caller)
+}
+
+#[ic_cdk::update]
+async fn wallet_notify_deposit() -> Result<String, String> {
+    require_wallet_owner()?;
+    let caller = ic_cdk::api::msg_caller();
+    let subaccount = principal_to_subaccount(&caller);
+    let canister_id = ic_cdk::api::id();
+
+    // 1. Check subaccount balance via icrc1_balance_of
+    let balance_args = (Icrc1Account {
+        owner: canister_id,
+        subaccount: Some(subaccount),
+    },);
+    let (sub_balance,): (candid::Nat,) = ic_cdk::call(ICP_LEDGER, "icrc1_balance_of", balance_args)
+        .await
+        .map_err(|e| format!("Failed to query ledger balance: {:?}", e))?;
+
+    let sub_balance_u64: u64 = sub_balance.0.try_into()
+        .map_err(|_| "Balance too large".to_string())?;
+
+    if sub_balance_u64 <= ICP_FEE_E8S {
+        return Err(format!(
+            "No deposit found. Subaccount balance: {} e8s (need > {} fee)",
+            sub_balance_u64, ICP_FEE_E8S
+        ));
+    }
+
+    let transfer_amount = sub_balance_u64 - ICP_FEE_E8S;
+
+    // 2. Sweep: transfer from subaccount to canister's main account
+    let transfer_args = (Icrc1TransferArgs {
+        from_subaccount: Some(subaccount),
+        to: Icrc1Account { owner: canister_id, subaccount: None },
+        amount: candid::Nat::from(transfer_amount),
+        fee: Some(candid::Nat::from(ICP_FEE_E8S)),
+        memo: None,
+        created_at_time: None,
+    },);
+
+    let (result,): (Result<candid::Nat, Icrc1TransferError>,) =
+        ic_cdk::call(ICP_LEDGER, "icrc1_transfer", transfer_args)
+            .await
+            .map_err(|e| format!("Sweep transfer failed: {:?}", e))?;
+
+    let block_height: u64 = match result {
+        Ok(idx) => idx.0.try_into().unwrap_or(0),
+        Err(e) => return Err(format!("Ledger transfer error: {:?}", e)),
+    };
+
+    // 3. Credit user's internal balance
+    let mut bal = get_user_balance(&caller);
+    bal.available_e8s += transfer_amount;
+    bal.total_deposited_e8s += transfer_amount;
+    bal.tx_count += 1;
+    bal.updated_at = ic_cdk::api::time();
+    set_user_balance(&caller, bal);
+
+    // 4. Log tx
+    log_wallet_tx(&caller, TxRecord {
+        tx_type: 0, // deposit
+        amount_e8s: transfer_amount,
+        fee_e8s: ICP_FEE_E8S,
+        block_height,
+        timestamp: ic_cdk::api::time(),
+        status: 1, // confirmed
+    });
+
+    Ok(format!(
+        "Deposited {}.{:04} ICP (block {})",
+        transfer_amount / 100_000_000,
+        (transfer_amount % 100_000_000) / 10_000,
+        block_height
+    ))
+}
+
+#[ic_cdk::update]
+async fn wallet_withdraw(amount_e8s: u64) -> Result<String, String> {
+    require_wallet_owner()?;
+    let caller = ic_cdk::api::msg_caller();
+
+    if amount_e8s == 0 {
+        return Err("Amount must be > 0".into());
+    }
+
+    let total_needed = amount_e8s + ICP_FEE_E8S;
+
+    // 1. Deduct from available, move to pending
+    let mut bal = get_user_balance(&caller);
+    if bal.available_e8s < total_needed {
+        return Err(format!(
+            "Insufficient balance: have {} e8s, need {} (amount {} + fee {})",
+            bal.available_e8s, total_needed, amount_e8s, ICP_FEE_E8S
+        ));
+    }
+    bal.available_e8s -= total_needed;
+    bal.pending_e8s += total_needed;
+    bal.updated_at = ic_cdk::api::time();
+    set_user_balance(&caller, bal.clone());
+
+    // 2. Transfer ICP to user
+    let transfer_args = (Icrc1TransferArgs {
+        from_subaccount: None, // from canister's main account
+        to: Icrc1Account { owner: caller, subaccount: None },
+        amount: candid::Nat::from(amount_e8s),
+        fee: Some(candid::Nat::from(ICP_FEE_E8S)),
+        memo: None,
+        created_at_time: None,
+    },);
+
+    let (result,): (Result<candid::Nat, Icrc1TransferError>,) =
+        ic_cdk::call(ICP_LEDGER, "icrc1_transfer", transfer_args)
+            .await
+            .map_err(|e| {
+                // Refund on call failure
+                let mut bal = get_user_balance(&caller);
+                bal.available_e8s += total_needed;
+                bal.pending_e8s -= total_needed;
+                bal.updated_at = ic_cdk::api::time();
+                set_user_balance(&caller, bal);
+                format!("Withdrawal transfer failed: {:?}", e)
+            })?;
+
+    match result {
+        Ok(block_idx) => {
+            let block_height: u64 = block_idx.0.try_into().unwrap_or(0);
+            // Success: clear pending, record withdrawal
+            let mut bal = get_user_balance(&caller);
+            bal.pending_e8s -= total_needed;
+            bal.total_withdrawn_e8s += amount_e8s;
+            bal.tx_count += 1;
+            bal.updated_at = ic_cdk::api::time();
+            set_user_balance(&caller, bal);
+
+            log_wallet_tx(&caller, TxRecord {
+                tx_type: 1, // withdrawal
+                amount_e8s,
+                fee_e8s: ICP_FEE_E8S,
+                block_height,
+                timestamp: ic_cdk::api::time(),
+                status: 1, // confirmed
+            });
+
+            Ok(format!(
+                "Withdrew {}.{:04} ICP (block {})",
+                amount_e8s / 100_000_000,
+                (amount_e8s % 100_000_000) / 10_000,
+                block_height
+            ))
+        }
+        Err(e) => {
+            // Refund on ledger error
+            let mut bal = get_user_balance(&caller);
+            bal.available_e8s += total_needed;
+            bal.pending_e8s -= total_needed;
+            bal.tx_count += 1;
+            bal.updated_at = ic_cdk::api::time();
+            set_user_balance(&caller, bal);
+
+            log_wallet_tx(&caller, TxRecord {
+                tx_type: 1,
+                amount_e8s,
+                fee_e8s: ICP_FEE_E8S,
+                block_height: 0,
+                timestamp: ic_cdk::api::time(),
+                status: 2, // failed
+            });
+
+            Err(format!("Withdrawal failed (refunded): {:?}", e))
+        }
+    }
+}
+
+#[ic_cdk::query]
+fn wallet_tx_history(limit: u64) -> Vec<TxRecord> {
+    require_wallet_owner().unwrap_or_else(|e| ic_cdk::trap(&e));
+    let caller = ic_cdk::api::msg_caller();
+    let bal = get_user_balance(&caller);
+    let cap = limit.min(50) as usize;
+
+    if bal.tx_count == 0 {
+        return vec![];
+    }
+
+    let key = StorablePrincipal(caller);
+    WALLET_TX_LOG.with(|t| {
+        let map = t.borrow();
+        // Scan in reverse order (newest first) using range
+        let start = TxKey { principal: key.clone(), tx_index: 0 };
+        let end = TxKey { principal: key.clone(), tx_index: bal.tx_count };
+        let mut txs: Vec<TxRecord> = map.range(start..=end).map(|(_, v)| v).collect();
+        txs.reverse(); // newest first
+        txs.truncate(cap);
+        txs
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -45,6 +45,24 @@ type WebEntry = record {
     timestamp : nat64;
 };
 
+type UserBalance = record {
+    available_e8s : nat64;
+    pending_e8s : nat64;
+    total_deposited_e8s : nat64;
+    total_withdrawn_e8s : nat64;
+    tx_count : nat64;
+    updated_at : nat64;
+};
+
+type TxRecord = record {
+    tx_type : nat8;
+    amount_e8s : nat64;
+    fee_e8s : nat64;
+    block_height : nat64;
+    timestamp : nat64;
+    status : nat8;
+};
+
 type HttpHeader = record { name : text; value : text };
 type HttpResponse = record { status : nat; headers : vec HttpHeader; body : vec nat8 };
 type TransformArgs = record { response : HttpResponse; context : vec nat8 };
@@ -92,6 +110,15 @@ service : {
     "get_web_memory" : () -> (vec WebEntry) query;
     "clear_web_memory" : () -> (variant { Ok : null; Err : text });
 
+
+    // Wallet (NFT-gated)
+    "is_wallet_owner" : () -> (bool) query;
+    "wallet_connect" : () -> (variant { Ok : text; Err : text });
+    "wallet_balance" : () -> (UserBalance) query;
+    "wallet_deposit_address" : () -> (text) query;
+    "wallet_notify_deposit" : () -> (variant { Ok : text; Err : text });
+    "wallet_withdraw" : (nat64) -> (variant { Ok : text; Err : text });
+    "wallet_tx_history" : (nat64) -> (vec TxRecord) query;
 
     // On-chain tools (free queries)
     "principal_to_account_id" : (text) -> (variant { Ok : text; Err : text }) query;
