@@ -4,6 +4,7 @@ Real stealth scraping + LLM synthesis. Bypasses anti-bot, gets actual data.
 - /search: DuckDuckGo via StealthyFetcher + AI summary
 - /browse: Stealth scrape any URL + AI extraction
 - /ask: Search + scrape top results + AI answer with real data
+- /hit: Hit a URL and return status/headers (no scraping or AI)
 - /price: Live crypto prices (CoinGecko API)
 - / : Dashboard UI (login required)
 """
@@ -534,6 +535,29 @@ def _truncate_utf8(text: str, max_bytes: int) -> str:
         return text
     truncated = encoded[:max_bytes]
     return truncated.decode("utf-8", errors="ignore")
+
+
+@app.get("/hit")
+async def hit(url: str = Query(..., description="URL to hit")):
+    """Hit a URL and return status code, headers, and response time. No scraping or AI."""
+    try:
+        t0 = time.time()
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(url)
+        elapsed = round(time.time() - t0, 3)
+        headers = dict(resp.headers)
+        log_activity("hit", f"{url} → {resp.status_code} ({elapsed}s)", "ok")
+        return JSONResponse({
+            "url": url,
+            "status_code": resp.status_code,
+            "content_type": headers.get("content-type", ""),
+            "content_length": int(headers.get("content-length", 0)) or len(resp.content),
+            "elapsed": elapsed,
+            "headers": headers,
+        })
+    except Exception as e:
+        log_activity("hit", f"{url}: {e}", "error")
+        return JSONResponse({"url": url, "error": str(e)}, status_code=502)
 
 
 @app.get("/health")
