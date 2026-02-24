@@ -1828,61 +1828,34 @@ fn log_wallet_tx(principal: &Principal, record: TxRecord) -> u64 {
     tx_index
 }
 
-/// Check that the caller is the NFT-verified wallet owner.
+/// Check that the caller is authenticated (not anonymous).
+/// Wallet balances are per-principal via WALLET_BALANCES BTreeMap.
 fn require_wallet_owner() -> Result<(), String> {
     let caller = ic_cdk::api::msg_caller();
     if caller == Principal::anonymous() {
-        return Err("Anonymous calls not allowed".into());
-    }
-    let owner = WALLET_OWNER.with(|w| w.borrow().get().clone());
-    if owner.0 == Principal::anonymous() {
-        return Err("Wallet not activated — verify NFT ownership first".into());
-    }
-    if owner.0 != caller {
-        return Err("Access denied: wallet owner only".into());
+        return Err("Anonymous calls not allowed — connect with II or Plug".into());
     }
     Ok(())
 }
 
-/// Returns true if the caller is the verified NFT wallet owner.
+/// Returns true if the caller is authenticated (not anonymous).
 #[ic_cdk::query]
 fn is_wallet_owner() -> bool {
-    let caller = ic_cdk::api::msg_caller();
-    if caller == Principal::anonymous() { return false; }
-    WALLET_OWNER.with(|w| w.borrow().get().0 == caller)
+    ic_cdk::api::msg_caller() != Principal::anonymous()
 }
 
-/// Verify NFT ownership via EXT bearer call and activate wallet access.
+/// Register the caller as a wallet user. No NFT gate — any authenticated user (II or Plug).
 #[ic_cdk::update]
 async fn wallet_connect() -> Result<String, String> {
     require_authorized()?;
     let caller = ic_cdk::api::msg_caller();
 
-    let nft_canister = Principal::from_text("5movr-diaaa-aaaak-aaftq-cai")
-        .map_err(|e| format!("Invalid NFT canister: {}", e))?;
-
-    let (result,): (ExtBearerResult,) =
-        ic_cdk::call(nft_canister, "bearer", (NFT_TOKEN_ID.to_string(),))
-            .await
-            .map_err(|e| format!("NFT canister call failed: {:?}", e))?;
-
-    let owner_account_id = match result {
-        ExtBearerResult::ok(aid) => aid,
-        ExtBearerResult::err(e) => return Err(format!("NFT lookup failed: {:?}", e)),
-    };
-
-    let caller_account_id = derive_account_id(&caller);
-
-    if owner_account_id != caller_account_id {
-        return Err("Access denied: you do not own this NFT".into());
-    }
-
-    // Store verified wallet owner
+    // Store as last-connected wallet owner (for backward compat)
     WALLET_OWNER.with(|w| {
         let _ = w.borrow_mut().set(StorablePrincipal(caller));
     });
 
-    Ok("Wallet activated — NFT ownership verified".into())
+    Ok("Wallet connected".into())
 }
 
 #[ic_cdk::query]

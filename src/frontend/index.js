@@ -161,19 +161,8 @@ async function loginII() {
   principalId = identity.getPrincipal().toText();
   authProvider = 'ii';
   await createAuthenticatedActor();
-  // NFT gate — must own NFT to proceed
-  try {
-    const r = await actor.wallet_connect();
-    if (r?.Err) {
-      toast('NFT ownership required');
-      await logout();
-      return;
-    }
-  } catch (e) {
-    toast('NFT verification failed');
-    await logout();
-    return;
-  }
+  // Register wallet user
+  try { await actor.wallet_connect(); } catch (_) {}
   updateAuthUI(true);
   toast('II connected: ' + principalId.slice(0, 8) + '...');
   syncSend();
@@ -198,19 +187,8 @@ async function loginPlug() {
     authProvider = 'plug';
     const { idlFactory } = await import("declarations/picoclaw");
     actor = await window.ic.plug.createActor({ canisterId, interfaceFactory: idlFactory });
-    // NFT gate — must own NFT to proceed
-    try {
-      const r = await actor.wallet_connect();
-      if (r?.Err) {
-        toast('NFT ownership required');
-        await logout();
-        return;
-      }
-    } catch (e2) {
-      toast('NFT verification failed');
-      await logout();
-      return;
-    }
+    // Register wallet user
+    try { await actor.wallet_connect(); } catch (_) {}
     updateAuthUI(true);
     toast('Plug connected: ' + principalId.slice(0, 8) + '...');
     syncSend();
@@ -840,14 +818,8 @@ await initAuth();
 syncSend();
 checkHealth();
 if (identity) {
-  // Re-verify NFT for returning II sessions
-  try {
-    const r = await actor.wallet_connect();
-    if (r?.Err) {
-      toast('NFT ownership required');
-      await logout();
-    }
-  } catch { await logout(); }
+  // Re-register for returning sessions
+  try { await actor.wallet_connect(); } catch (_) {}
   if (identity) {
     loadProfile();
     refreshMemory();
