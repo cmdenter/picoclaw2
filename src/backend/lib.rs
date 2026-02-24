@@ -654,6 +654,67 @@ pub enum Icrc1TransferError {
     GenericError { error_code: candid::Nat, message: String },
 }
 
+// ── Per-user token balance key: principal (30 bytes) + symbol (10 bytes) ──
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TokenBalKey {
+    pub principal: StorablePrincipal,
+    pub symbol: [u8; 10], // zero-padded symbol bytes
+}
+
+impl TokenBalKey {
+    fn new(principal: &Principal, symbol: &str) -> Self {
+        let mut sym = [0u8; 10];
+        let bytes = symbol.as_bytes();
+        let len = bytes.len().min(10);
+        sym[..len].copy_from_slice(&bytes[..len]);
+        Self { principal: StorablePrincipal(*principal), symbol: sym }
+    }
+
+    fn symbol_str(&self) -> String {
+        let end = self.symbol.iter().position(|&b| b == 0).unwrap_or(10);
+        String::from_utf8_lossy(&self.symbol[..end]).into_owned()
+    }
+}
+
+impl Storable for TokenBalKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        let mut buf = Vec::with_capacity(40);
+        let pb = self.principal.0.as_slice();
+        let mut principal_buf = [0u8; 30];
+        principal_buf[0] = pb.len() as u8;
+        principal_buf[1..1 + pb.len()].copy_from_slice(pb);
+        buf.extend_from_slice(&principal_buf);
+        buf.extend_from_slice(&self.symbol);
+        Cow::Owned(buf)
+    }
+
+    fn from_bytes(bytes: Cow<'_, [u8]>) -> Self {
+        let d = bytes.as_ref();
+        let len = d[0] as usize;
+        let principal = StorablePrincipal(Principal::from_slice(&d[1..1 + len]));
+        let mut symbol = [0u8; 10];
+        symbol.copy_from_slice(&d[30..40]);
+        Self { principal, symbol }
+    }
+
+    const BOUND: Bound = Bound::Bounded { max_size: 40, is_fixed_size: true };
+}
+
+/// Get a user's tracked balance for a specific token.
+fn get_token_balance(principal: &Principal, symbol: &str) -> u64 {
+    let key = TokenBalKey::new(principal, symbol);
+    TOKEN_BALANCES.with(|t| t.borrow().get(&key).unwrap_or(0u64))
+}
+
+/// Set a user's tracked balance for a specific token.
+fn set_token_balance(principal: &Principal, symbol: &str, amount: u64) {
+    let key = TokenBalKey::new(principal, symbol);
+    TOKEN_BALANCES.with(|t| {
+        t.borrow_mut().insert(key, amount);
+    });
+}
+
 // ── ICRC-2 Approve types (for KongSwap integration) ─────────────────────
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -832,6 +893,11 @@ thread_local! {
             MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(10))),
             StorablePrincipal(Principal::anonymous())
         ).expect("wallet owner cell init")
+    );
+
+    // Per-user token balances for non-ICP tokens (MemoryId 11)
+    static TOKEN_BALANCES: RefCell<StableBTreeMap<TokenBalKey, u64, Memory>> = RefCell::new(
+        StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(11))))
     );
 
     static MSG_COUNTER: RefCell<u64> = RefCell::new(0);
@@ -2071,34 +2137,22 @@ fn wallet_tx_history(limit: u64) -> Vec<TxRecord> {
 //  KongSwap — token balances, quote, and swap execution
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Query balances for all supported tokens on the canister's principal.
+/// Query per-user balances for all supported tokens.
+/// ICP uses the internal wallet ledger; other tokens use per-user TOKEN_BALANCES tracking.
 #[ic_cdk::update]
 async fn token_balances() -> Result<Vec<TokenBalance>, String> {
     require_wallet_owner()?;
-    let canister_id = ic_cdk::api::id();
+    let caller = ic_cdk::api::msg_caller();
     let mut balances = Vec::new();
 
     for token in TOKENS {
-        let ledger = token_ledger_principal(token);
-        let account = Icrc1Account { owner: canister_id, subaccount: None };
-
-        // For ICP, use the internal wallet balance (user's tracked balance)
-        if token.symbol == "ICP" {
-            let caller = ic_cdk::api::msg_caller();
-            let bal = get_user_balance(&caller);
-            balances.push(TokenBalance {
-                symbol: token.symbol.to_string(),
-                balance_raw: bal.available_e8s,
-                decimals: token.decimals,
-            });
-            continue;
-        }
-
-        let raw: u64 = match ic_cdk::call::<(Icrc1Account,), (candid::Nat,)>(ledger, "icrc1_balance_of", (account,)).await {
-            Ok((bal,)) => bal.0.try_into().unwrap_or(0u64),
-            Err(_) => 0u64,
+        let raw = if token.symbol == "ICP" {
+            get_user_balance(&caller).available_e8s
+        } else {
+            get_token_balance(&caller, token.symbol)
         };
-        if raw > 0 {
+
+        if raw > 0 || token.symbol == "ICP" {
             balances.push(TokenBalance {
                 symbol: token.symbol.to_string(),
                 balance_raw: raw,
@@ -2151,52 +2205,60 @@ async fn swap_execute(pay_symbol: String, pay_amount_human: String, receive_symb
         return Err("Amount must be positive".into());
     }
     let pay_amount_raw = (amount_f * 10f64.powi(pay_token.decimals as i32)) as u128;
+    let pay_raw_u64 = pay_amount_raw as u64;
+    let total_deduct = pay_raw_u64 + pay_token.fee;
     let pay_ledger = token_ledger_principal(pay_token);
     let kong = kong_backend();
+    let is_pay_icp = pay_symbol.to_uppercase() == "ICP";
 
-    // For ICP: deduct from internal wallet balance first
-    if pay_symbol.to_uppercase() == "ICP" {
-        let e8s = pay_amount_raw as u64;
+    // ── Deduct from user's per-principal wallet ──
+    if is_pay_icp {
         let mut bal = get_user_balance(&caller);
-        if bal.available_e8s < e8s + pay_token.fee {
+        if bal.available_e8s < total_deduct {
             return Err(format!(
-                "Insufficient ICP balance: have {:.4} ICP, need {:.4} ICP",
-                bal.available_e8s as f64 / 1e8,
-                (e8s + pay_token.fee) as f64 / 1e8
+                "Insufficient ICP: have {:.4}, need {:.4}",
+                bal.available_e8s as f64 / 1e8, total_deduct as f64 / 1e8
             ));
         }
-        bal.available_e8s -= e8s + pay_token.fee;
-        bal.pending_e8s += e8s + pay_token.fee;
+        bal.available_e8s -= total_deduct;
+        bal.pending_e8s += total_deduct;
         bal.updated_at = ic_cdk::api::time();
         set_user_balance(&caller, bal);
-
-        // Transfer ICP from canister main account to canister (no-op for main account).
-        // For ICP swaps, the canister holds the ICP on its main account after deposit sweep.
-        // We just need to approve KongSwap to spend from the canister's main account.
     } else {
-        // For non-ICP tokens: check canister's balance on the token ledger
-        let canister_id = ic_cdk::api::id();
-        let account = Icrc1Account { owner: canister_id, subaccount: None };
-        let (bal_nat,): (candid::Nat,) = ic_cdk::call(pay_ledger, "icrc1_balance_of", (account,))
-            .await
-            .map_err(|e| format!("Balance check failed: {:?}", e))?;
-        let bal_raw: u128 = bal_nat.0.try_into().unwrap_or(0u128);
-        if bal_raw < pay_amount_raw + pay_token.fee as u128 {
+        let user_bal = get_token_balance(&caller, &pay_symbol);
+        if user_bal < total_deduct {
+            let dec = pay_token.decimals as i32;
             return Err(format!(
-                "Insufficient {} balance on canister",
-                pay_symbol
+                "Insufficient {}: have {:.6}, need {:.6}",
+                pay_symbol,
+                user_bal as f64 / 10f64.powi(dec),
+                total_deduct as f64 / 10f64.powi(dec)
             ));
         }
+        set_token_balance(&caller, &pay_symbol, user_bal - total_deduct);
     }
 
-    // Step 1: ICRC-2 approve KongSwap to spend pay tokens
-    let approve_amount = pay_amount_raw + pay_token.fee as u128; // amount + fee for the swap
+    // Helper closure: refund on failure
+    let refund = |caller: &Principal, sym: &str, is_icp: bool, amount: u64| {
+        if is_icp {
+            let mut bal = get_user_balance(caller);
+            bal.available_e8s += amount;
+            bal.pending_e8s = bal.pending_e8s.saturating_sub(amount);
+            bal.updated_at = ic_cdk::api::time();
+            set_user_balance(caller, bal);
+        } else {
+            let cur = get_token_balance(caller, sym);
+            set_token_balance(caller, sym, cur + amount);
+        }
+    };
+
+    // ── Step 1: ICRC-2 approve KongSwap ──
     let approve_args = Icrc2ApproveArgs {
         from_subaccount: None,
         spender: Icrc1Account { owner: kong, subaccount: None },
-        amount: candid::Nat::from(approve_amount),
+        amount: candid::Nat::from(pay_amount_raw + pay_token.fee as u128),
         expected_allowance: None,
-        expires_at: Some(ic_cdk::api::time() + 120_000_000_000), // 2 minutes
+        expires_at: Some(ic_cdk::api::time() + 120_000_000_000),
         fee: Some(candid::Nat::from(pay_token.fee)),
         memo: None,
         created_at_time: None,
@@ -2205,40 +2267,26 @@ async fn swap_execute(pay_symbol: String, pay_amount_human: String, receive_symb
     let approve_result: Result<(Result<candid::Nat, Icrc2ApproveError>,), _> =
         ic_cdk::call(pay_ledger, "icrc2_approve", (approve_args,)).await;
 
-    if let Err(e) = approve_result {
-        // Refund ICP if approval call failed
-        if pay_symbol.to_uppercase() == "ICP" {
-            let e8s = pay_amount_raw as u64;
-            let mut bal = get_user_balance(&caller);
-            bal.available_e8s += e8s + pay_token.fee;
-            bal.pending_e8s -= e8s + pay_token.fee;
-            bal.updated_at = ic_cdk::api::time();
-            set_user_balance(&caller, bal);
+    match &approve_result {
+        Err(e) => {
+            refund(&caller, &pay_symbol, is_pay_icp, total_deduct);
+            return Err(format!("ICRC-2 approve failed: {:?}", e));
         }
-        return Err(format!("ICRC-2 approve failed: {:?}", e));
+        Ok((Err(e),)) => {
+            refund(&caller, &pay_symbol, is_pay_icp, total_deduct);
+            return Err(format!("ICRC-2 approve error: {:?}", e));
+        }
+        Ok((Ok(_),)) => {} // approved
     }
 
-    let (approve_inner,) = approve_result.unwrap();
-    if let Err(e) = approve_inner {
-        if pay_symbol.to_uppercase() == "ICP" {
-            let e8s = pay_amount_raw as u64;
-            let mut bal = get_user_balance(&caller);
-            bal.available_e8s += e8s + pay_token.fee;
-            bal.pending_e8s -= e8s + pay_token.fee;
-            bal.updated_at = ic_cdk::api::time();
-            set_user_balance(&caller, bal);
-        }
-        return Err(format!("ICRC-2 approve error: {:?}", e));
-    }
-
-    // Step 2: Call KongSwap swap
+    // ── Step 2: KongSwap swap ──
     let swap_args = KongSwapArgs {
         pay_symbol: pay_symbol.clone(),
         pay_amount: candid::Nat::from(pay_amount_raw),
         receive_symbol: receive_symbol.clone(),
         receive_amount: None,
         receive_address: None,
-        max_slippage: Some(1.5), // 1.5%
+        max_slippage: Some(1.5),
         referred_by: None,
     };
 
@@ -2247,30 +2295,35 @@ async fn swap_execute(pay_symbol: String, pay_amount_human: String, receive_symb
 
     match swap_result {
         Ok((Ok(reply),)) => {
-            // Success — clear pending for ICP
-            if pay_symbol.to_uppercase() == "ICP" {
-                let e8s = pay_amount_raw as u64;
+            // ── Success: finalize pay side ──
+            if is_pay_icp {
                 let mut bal = get_user_balance(&caller);
-                bal.pending_e8s = bal.pending_e8s.saturating_sub(e8s + pay_token.fee);
+                bal.pending_e8s = bal.pending_e8s.saturating_sub(total_deduct);
                 bal.tx_count += 1;
                 bal.updated_at = ic_cdk::api::time();
                 set_user_balance(&caller, bal);
             }
+            // (non-ICP pay already deducted above — nothing to finalize)
 
-            let recv_raw: u128 = reply.receive_amount.0.try_into().unwrap_or(0u128);
-            let recv_token = find_token(&reply.receive_symbol).unwrap_or(find_token("ICP").unwrap());
+            // ── Success: credit receive side to user's wallet ──
+            let recv_raw: u64 = reply.receive_amount.0.try_into().unwrap_or(0u64);
+            let recv_sym = &reply.receive_symbol;
+            let is_recv_icp = recv_sym.to_uppercase() == "ICP";
+
+            if is_recv_icp {
+                let mut bal = get_user_balance(&caller);
+                bal.available_e8s += recv_raw;
+                bal.tx_count += 1;
+                bal.updated_at = ic_cdk::api::time();
+                set_user_balance(&caller, bal);
+            } else {
+                let cur = get_token_balance(&caller, recv_sym);
+                set_token_balance(&caller, recv_sym, cur + recv_raw);
+            }
+
+            let recv_token = find_token(recv_sym).unwrap_or(find_token("ICP").unwrap());
             let recv_human = recv_raw as f64 / 10f64.powi(recv_token.decimals as i32);
             let pay_human_disp = pay_amount_raw as f64 / 10f64.powi(pay_token.decimals as i32);
-
-            // If receiving ICP, credit the user's internal balance
-            if reply.receive_symbol.to_uppercase() == "ICP" {
-                let recv_e8s = recv_raw as u64;
-                let mut bal = get_user_balance(&caller);
-                bal.available_e8s += recv_e8s;
-                bal.tx_count += 1;
-                bal.updated_at = ic_cdk::api::time();
-                set_user_balance(&caller, bal);
-            }
 
             Ok(format!(
                 "Swapped {:.6} {} -> {:.6} {} (price: {:.6}, slippage: {:.2}%)",
@@ -2280,27 +2333,11 @@ async fn swap_execute(pay_symbol: String, pay_amount_human: String, receive_symb
             ))
         }
         Ok((Err(e),)) => {
-            // Swap failed — refund ICP
-            if pay_symbol.to_uppercase() == "ICP" {
-                let e8s = pay_amount_raw as u64;
-                let mut bal = get_user_balance(&caller);
-                bal.available_e8s += e8s + pay_token.fee;
-                bal.pending_e8s = bal.pending_e8s.saturating_sub(e8s + pay_token.fee);
-                bal.updated_at = ic_cdk::api::time();
-                set_user_balance(&caller, bal);
-            }
+            refund(&caller, &pay_symbol, is_pay_icp, total_deduct);
             Err(format!("Swap failed: {}", e))
         }
         Err(e) => {
-            // Call failed — refund ICP
-            if pay_symbol.to_uppercase() == "ICP" {
-                let e8s = pay_amount_raw as u64;
-                let mut bal = get_user_balance(&caller);
-                bal.available_e8s += e8s + pay_token.fee;
-                bal.pending_e8s = bal.pending_e8s.saturating_sub(e8s + pay_token.fee);
-                bal.updated_at = ic_cdk::api::time();
-                set_user_balance(&caller, bal);
-            }
+            refund(&caller, &pay_symbol, is_pay_icp, total_deduct);
             Err(format!("Swap call failed: {:?}", e))
         }
     }
