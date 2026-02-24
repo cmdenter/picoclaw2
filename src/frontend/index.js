@@ -660,6 +660,29 @@ function fmtIcp(e8s) {
   return (n / 1e8).toFixed(4);
 }
 
+async function refreshHoldings() {
+  if (!actor?.token_balances) return;
+  const list = document.getElementById('holdingsList');
+  try {
+    const result = await actor.token_balances();
+    const balances = result?.Ok || result;
+    if (!balances || !balances.length) {
+      list.innerHTML = '<div class="wallet-tx-empty">No tokens held</div>';
+      return;
+    }
+    list.innerHTML = balances.map(b => {
+      const dec = Number(b.decimals);
+      const amount = (Number(b.balance_raw) / Math.pow(10, dec)).toFixed(dec > 6 ? 4 : dec > 2 ? 4 : 2);
+      return '<div class="wallet-tx-item">' +
+        '<span class="wallet-tx-type deposit">' + b.symbol + '</span>' +
+        '<span class="wallet-tx-amount">' + amount + '</span>' +
+        '</div>';
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="wallet-tx-empty">Failed to load holdings</div>';
+  }
+}
+
 async function refreshWallet() {
   if (!actor || !identity) return;
   try {
@@ -676,6 +699,7 @@ async function refreshWallet() {
     walletTxCount.textContent = bal.tx_count.toString();
     walletDepositAddr.textContent = addr;
     renderTxHistory(txs);
+    refreshHoldings(); // async, don't await — let it load independently
     walletStatus.textContent = bal.updated_at > 0n
       ? 'Updated ' + new Date(Number(bal.updated_at) / 1e6).toLocaleTimeString()
       : '';

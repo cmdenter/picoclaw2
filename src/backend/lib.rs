@@ -163,7 +163,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             persona: "PicoClaw".into(),
-            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only — no markdown, no **, no #. You MUST call the web_search tool for ANY question about current events, news, prices, weather, sports, stocks, or anything requiring up-to-date information. NEVER say you cannot browse the web. NEVER tell the user to check a website. ALWAYS use web_search instead. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W].".into(),
+            system_prompt: "You are PicoClaw, an on-chain AI on the Internet Computer. Be concise and helpful. Plain text only — no markdown, no **, no #. You MUST call the web_search tool for ANY question about current events, news, prices, weather, sports, stocks, or anything requiring up-to-date information. NEVER say you cannot browse the web. NEVER tell the user to check a website. ALWAYS use web_search instead. URLs in user messages are auto-scraped via [Web:]. Past lookups in [W]. You can swap tokens using the token_swap tool. Supported tokens: ICP, ckUSDC, ckUSDT. When the user asks to swap/trade/exchange tokens, use the token_swap tool with pay_symbol, pay_amount, and receive_symbol.".into(),
             allowed_tools: vec![],
             api_key: None,
             model: "deepseek-ai/DeepSeek-V3".into(),
@@ -654,6 +654,110 @@ pub enum Icrc1TransferError {
     GenericError { error_code: candid::Nat, message: String },
 }
 
+// ── ICRC-2 Approve types (for KongSwap integration) ─────────────────────
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Icrc2ApproveArgs {
+    pub from_subaccount: Option<[u8; 32]>,
+    pub spender: Icrc1Account,
+    pub amount: candid::Nat,
+    pub expected_allowance: Option<candid::Nat>,
+    pub expires_at: Option<u64>,
+    pub fee: Option<candid::Nat>,
+    pub memo: Option<Vec<u8>>,
+    pub created_at_time: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum Icrc2ApproveError {
+    BadFee { expected_fee: candid::Nat },
+    InsufficientFunds { balance: candid::Nat },
+    AllowanceChanged { current_allowance: candid::Nat },
+    Expired { ledger_time: u64 },
+    TooOld,
+    CreatedInFuture { ledger_time: u64 },
+    Duplicate { duplicate_of: candid::Nat },
+    TemporarilyUnavailable,
+    GenericError { error_code: candid::Nat, message: String },
+}
+
+// ── KongSwap Candid types ───────────────────────────────────────────────
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct KongSwapArgs {
+    pay_symbol: String,
+    pay_amount: candid::Nat,
+    receive_symbol: String,
+    receive_amount: Option<candid::Nat>,
+    receive_address: Option<String>,
+    max_slippage: Option<f64>,
+    referred_by: Option<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct KongSwapReply {
+    request_id: u64,
+    status: String,
+    pay_symbol: String,
+    pay_amount: candid::Nat,
+    receive_symbol: String,
+    receive_amount: candid::Nat,
+    price: f64,
+    slippage: f64,
+    claim_ids: Vec<u64>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct KongSwapAmountsReply {
+    pay_symbol: String,
+    pay_amount: candid::Nat,
+    receive_symbol: String,
+    receive_amount: candid::Nat,
+    price: f64,
+    slippage: f64,
+}
+
+// ── Token registry ──────────────────────────────────────────────────────
+
+struct TokenInfo {
+    symbol: &'static str,
+    ledger_text: &'static str,
+    decimals: u8,
+    fee: u64,
+}
+
+const KONG_BACKEND_TEXT: &str = "l4lgk-raaaa-aaaar-qahpq-cai";
+
+const TOKENS: &[TokenInfo] = &[
+    TokenInfo { symbol: "ICP",    ledger_text: "ryjl3-tyaaa-aaaaa-aaaba-cai", decimals: 8, fee: 10_000 },
+    TokenInfo { symbol: "ckUSDC", ledger_text: "xevnm-gaaaa-aaaar-qafnq-cai", decimals: 6, fee: 10_000 },
+    TokenInfo { symbol: "ckUSDT", ledger_text: "cngnf-vqaaa-aaaar-qag4q-cai", decimals: 6, fee: 10_000 },
+];
+
+fn find_token(symbol: &str) -> Result<&'static TokenInfo, String> {
+    let upper = symbol.to_uppercase();
+    TOKENS.iter()
+        .find(|t| t.symbol.to_uppercase() == upper)
+        .ok_or_else(|| format!("Unsupported token: {}. Supported: ICP, ckUSDC, ckUSDT", symbol))
+}
+
+fn token_ledger_principal(token: &TokenInfo) -> Principal {
+    Principal::from_text(token.ledger_text).unwrap()
+}
+
+fn kong_backend() -> Principal {
+    Principal::from_text(KONG_BACKEND_TEXT).unwrap()
+}
+
+// ── Token balance return type ───────────────────────────────────────────
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct TokenBalance {
+    pub symbol: String,
+    pub balance_raw: u64,
+    pub decimals: u8,
+}
+
 // ── EXT NFT types (for ownership verification) ─────────────────────────
 
 #[derive(CandidType, Deserialize, Debug, Clone)]
@@ -1120,6 +1224,63 @@ fn extract_json_string_field(s: &str, needle: &str) -> Option<String> {
 }
 
 
+/// Extract the tool name from a tool_calls response.
+fn extract_tool_name(body: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(body).ok()?;
+    // Look for "name":"<tool_name>" inside tool_calls
+    let tc_pos = s.find("\"tool_calls\"")?;
+    let after_tc = &s[tc_pos..];
+    extract_json_string_field(after_tc, "\"name\":")
+}
+
+/// Extract swap arguments from a tool_calls response.
+/// Returns (pay_symbol, pay_amount, receive_symbol).
+fn extract_swap_args(body: &[u8]) -> Option<(String, String, String)> {
+    let s = std::str::from_utf8(body).ok()?;
+
+    // Extract arguments string (could be string or object)
+    let args_needle = "\"arguments\":";
+    let args_pos = s.find(args_needle)? + args_needle.len();
+    let rest = s[args_pos..].trim_start();
+
+    let args_str = if rest.starts_with('"') {
+        // String format: "{\"pay_symbol\":\"ICP\",...}" — unescape
+        let inner = &rest[1..];
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        loop {
+            match chars.next()? {
+                '"' => break,
+                '\\' => match chars.next()? {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    'n' => out.push('\n'),
+                    c => { out.push('\\'); out.push(c); }
+                },
+                c => out.push(c),
+            }
+        }
+        out
+    } else {
+        // Raw object — find matching closing brace
+        let mut depth = 0;
+        let mut end = 0;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => { depth -= 1; if depth == 0 { end = i; break; } }
+                _ => {}
+            }
+        }
+        rest[..=end].to_string()
+    };
+
+    let pay_symbol = extract_json_string_field(&args_str, "\"pay_symbol\":")?;
+    let pay_amount = extract_json_string_field(&args_str, "\"pay_amount\":")?;
+    let receive_symbol = extract_json_string_field(&args_str, "\"receive_symbol\":")?;
+    Some((pay_symbol, pay_amount, receive_symbol))
+}
+
 /// Detect if the AI refused to search and told the user to check a website instead.
 fn is_search_refusal(reply: &str) -> bool {
     let lower = reply.to_lowercase();
@@ -1328,7 +1489,7 @@ fn build_messages_json(config: &AgentConfig, prompt: &str) -> String {
     json
 }
 
-const TOOLS_JSON: &str = r#","tools":[{"type":"function","function":{"name":"web_search","description":"Search the web for current information: news, prices, weather, sports, facts, or anything you need real-time data for. Always use this instead of saying you cannot browse.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}}}],"tool_choice":"auto""#;
+const TOOLS_JSON: &str = r#","tools":[{"type":"function","function":{"name":"web_search","description":"Search the web for current information: news, prices, weather, sports, facts, or anything you need real-time data for. Always use this instead of saying you cannot browse.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]}}},{"type":"function","function":{"name":"token_swap","description":"Swap tokens on KongSwap DEX using the bot wallet. Supported tokens: ICP, ckUSDC, ckUSDT. Use this when the user asks to swap, trade, or exchange tokens.","parameters":{"type":"object","properties":{"pay_symbol":{"type":"string","description":"Token to sell (e.g. ICP, ckUSDC, ckUSDT)"},"pay_amount":{"type":"string","description":"Amount to sell as a decimal string (e.g. 1.5)"},"receive_symbol":{"type":"string","description":"Token to buy (e.g. ckUSDC, ICP, ckUSDT)"}},"required":["pay_symbol","pay_amount","receive_symbol"]}}}],"tool_choice":"auto""#;
 
 fn build_request_body(config: &AgentConfig, prompt: &str) -> Vec<u8> {
     build_request_body_inner(config, prompt, true)
@@ -1934,6 +2095,245 @@ fn wallet_tx_history(limit: u64) -> Vec<TxRecord> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  KongSwap — token balances, quote, and swap execution
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Query balances for all supported tokens on the canister's principal.
+#[ic_cdk::update]
+async fn token_balances() -> Result<Vec<TokenBalance>, String> {
+    require_wallet_owner()?;
+    let canister_id = ic_cdk::api::id();
+    let mut balances = Vec::new();
+
+    for token in TOKENS {
+        let ledger = token_ledger_principal(token);
+        let account = Icrc1Account { owner: canister_id, subaccount: None };
+
+        // For ICP, use the internal wallet balance (user's tracked balance)
+        if token.symbol == "ICP" {
+            let caller = ic_cdk::api::msg_caller();
+            let bal = get_user_balance(&caller);
+            balances.push(TokenBalance {
+                symbol: token.symbol.to_string(),
+                balance_raw: bal.available_e8s,
+                decimals: token.decimals,
+            });
+            continue;
+        }
+
+        let raw: u64 = match ic_cdk::call::<(Icrc1Account,), (candid::Nat,)>(ledger, "icrc1_balance_of", (account,)).await {
+            Ok((bal,)) => bal.0.try_into().unwrap_or(0u64),
+            Err(_) => 0u64,
+        };
+        if raw > 0 {
+            balances.push(TokenBalance {
+                symbol: token.symbol.to_string(),
+                balance_raw: raw,
+                decimals: token.decimals,
+            });
+        }
+    }
+    Ok(balances)
+}
+
+/// Get a swap quote from KongSwap (no state changes, but must be update for inter-canister call).
+#[ic_cdk::update]
+async fn swap_quote(pay_symbol: String, pay_amount: String, receive_symbol: String) -> Result<String, String> {
+    require_wallet_owner()?;
+    let pay_token = find_token(&pay_symbol)?;
+    let _receive_token = find_token(&receive_symbol)?;
+
+    let amount_f: f64 = pay_amount.parse().map_err(|_| "Invalid amount".to_string())?;
+    let pay_amount_raw = (amount_f * 10f64.powi(pay_token.decimals as i32)) as u128;
+
+    let (result,): (Result<KongSwapAmountsReply, String>,) =
+        ic_cdk::call(kong_backend(), "swap_amounts", (pay_symbol.clone(), candid::Nat::from(pay_amount_raw), receive_symbol.clone()))
+            .await
+            .map_err(|e| format!("KongSwap quote failed: {:?}", e))?;
+
+    match result {
+        Ok(r) => {
+            let recv_raw: u128 = r.receive_amount.0.try_into().unwrap_or(0u128);
+            let recv_token = find_token(&receive_symbol)?;
+            let recv_human = recv_raw as f64 / 10f64.powi(recv_token.decimals as i32);
+            Ok(format!(
+                "{} {} -> {:.6} {} (price: {:.6}, slippage: {:.2}%)",
+                pay_amount, pay_symbol, recv_human, receive_symbol, r.price, r.slippage
+            ))
+        }
+        Err(e) => Err(format!("Quote error: {}", e)),
+    }
+}
+
+/// Execute a token swap via KongSwap: ICRC-2 approve → swap.
+#[ic_cdk::update]
+async fn swap_execute(pay_symbol: String, pay_amount_human: String, receive_symbol: String) -> Result<String, String> {
+    require_wallet_owner()?;
+    let caller = ic_cdk::api::msg_caller();
+
+    let pay_token = find_token(&pay_symbol)?;
+    let _receive_token = find_token(&receive_symbol)?;
+    let amount_f: f64 = pay_amount_human.parse().map_err(|_| "Invalid amount".to_string())?;
+    if amount_f <= 0.0 {
+        return Err("Amount must be positive".into());
+    }
+    let pay_amount_raw = (amount_f * 10f64.powi(pay_token.decimals as i32)) as u128;
+    let pay_ledger = token_ledger_principal(pay_token);
+    let kong = kong_backend();
+
+    // For ICP: deduct from internal wallet balance first
+    if pay_symbol.to_uppercase() == "ICP" {
+        let e8s = pay_amount_raw as u64;
+        let mut bal = get_user_balance(&caller);
+        if bal.available_e8s < e8s + pay_token.fee {
+            return Err(format!(
+                "Insufficient ICP balance: have {:.4} ICP, need {:.4} ICP",
+                bal.available_e8s as f64 / 1e8,
+                (e8s + pay_token.fee) as f64 / 1e8
+            ));
+        }
+        bal.available_e8s -= e8s + pay_token.fee;
+        bal.pending_e8s += e8s + pay_token.fee;
+        bal.updated_at = ic_cdk::api::time();
+        set_user_balance(&caller, bal);
+
+        // Transfer ICP from canister main account to canister (no-op for main account).
+        // For ICP swaps, the canister holds the ICP on its main account after deposit sweep.
+        // We just need to approve KongSwap to spend from the canister's main account.
+    } else {
+        // For non-ICP tokens: check canister's balance on the token ledger
+        let canister_id = ic_cdk::api::id();
+        let account = Icrc1Account { owner: canister_id, subaccount: None };
+        let (bal_nat,): (candid::Nat,) = ic_cdk::call(pay_ledger, "icrc1_balance_of", (account,))
+            .await
+            .map_err(|e| format!("Balance check failed: {:?}", e))?;
+        let bal_raw: u128 = bal_nat.0.try_into().unwrap_or(0u128);
+        if bal_raw < pay_amount_raw + pay_token.fee as u128 {
+            return Err(format!(
+                "Insufficient {} balance on canister",
+                pay_symbol
+            ));
+        }
+    }
+
+    // Step 1: ICRC-2 approve KongSwap to spend pay tokens
+    let approve_amount = pay_amount_raw + pay_token.fee as u128; // amount + fee for the swap
+    let approve_args = Icrc2ApproveArgs {
+        from_subaccount: None,
+        spender: Icrc1Account { owner: kong, subaccount: None },
+        amount: candid::Nat::from(approve_amount),
+        expected_allowance: None,
+        expires_at: Some(ic_cdk::api::time() + 120_000_000_000), // 2 minutes
+        fee: Some(candid::Nat::from(pay_token.fee)),
+        memo: None,
+        created_at_time: None,
+    };
+
+    let approve_result: Result<(Result<candid::Nat, Icrc2ApproveError>,), _> =
+        ic_cdk::call(pay_ledger, "icrc2_approve", (approve_args,)).await;
+
+    if let Err(e) = approve_result {
+        // Refund ICP if approval call failed
+        if pay_symbol.to_uppercase() == "ICP" {
+            let e8s = pay_amount_raw as u64;
+            let mut bal = get_user_balance(&caller);
+            bal.available_e8s += e8s + pay_token.fee;
+            bal.pending_e8s -= e8s + pay_token.fee;
+            bal.updated_at = ic_cdk::api::time();
+            set_user_balance(&caller, bal);
+        }
+        return Err(format!("ICRC-2 approve failed: {:?}", e));
+    }
+
+    let (approve_inner,) = approve_result.unwrap();
+    if let Err(e) = approve_inner {
+        if pay_symbol.to_uppercase() == "ICP" {
+            let e8s = pay_amount_raw as u64;
+            let mut bal = get_user_balance(&caller);
+            bal.available_e8s += e8s + pay_token.fee;
+            bal.pending_e8s -= e8s + pay_token.fee;
+            bal.updated_at = ic_cdk::api::time();
+            set_user_balance(&caller, bal);
+        }
+        return Err(format!("ICRC-2 approve error: {:?}", e));
+    }
+
+    // Step 2: Call KongSwap swap
+    let swap_args = KongSwapArgs {
+        pay_symbol: pay_symbol.clone(),
+        pay_amount: candid::Nat::from(pay_amount_raw),
+        receive_symbol: receive_symbol.clone(),
+        receive_amount: None,
+        receive_address: None,
+        max_slippage: Some(1.5), // 1.5%
+        referred_by: None,
+    };
+
+    let swap_result: Result<(Result<KongSwapReply, String>,), _> =
+        ic_cdk::call(kong, "swap", (swap_args,)).await;
+
+    match swap_result {
+        Ok((Ok(reply),)) => {
+            // Success — clear pending for ICP
+            if pay_symbol.to_uppercase() == "ICP" {
+                let e8s = pay_amount_raw as u64;
+                let mut bal = get_user_balance(&caller);
+                bal.pending_e8s = bal.pending_e8s.saturating_sub(e8s + pay_token.fee);
+                bal.tx_count += 1;
+                bal.updated_at = ic_cdk::api::time();
+                set_user_balance(&caller, bal);
+            }
+
+            let recv_raw: u128 = reply.receive_amount.0.try_into().unwrap_or(0u128);
+            let recv_token = find_token(&reply.receive_symbol).unwrap_or(find_token("ICP").unwrap());
+            let recv_human = recv_raw as f64 / 10f64.powi(recv_token.decimals as i32);
+            let pay_human_disp = pay_amount_raw as f64 / 10f64.powi(pay_token.decimals as i32);
+
+            // If receiving ICP, credit the user's internal balance
+            if reply.receive_symbol.to_uppercase() == "ICP" {
+                let recv_e8s = recv_raw as u64;
+                let mut bal = get_user_balance(&caller);
+                bal.available_e8s += recv_e8s;
+                bal.tx_count += 1;
+                bal.updated_at = ic_cdk::api::time();
+                set_user_balance(&caller, bal);
+            }
+
+            Ok(format!(
+                "Swapped {:.6} {} -> {:.6} {} (price: {:.6}, slippage: {:.2}%)",
+                pay_human_disp, reply.pay_symbol,
+                recv_human, reply.receive_symbol,
+                reply.price, reply.slippage
+            ))
+        }
+        Ok((Err(e),)) => {
+            // Swap failed — refund ICP
+            if pay_symbol.to_uppercase() == "ICP" {
+                let e8s = pay_amount_raw as u64;
+                let mut bal = get_user_balance(&caller);
+                bal.available_e8s += e8s + pay_token.fee;
+                bal.pending_e8s = bal.pending_e8s.saturating_sub(e8s + pay_token.fee);
+                bal.updated_at = ic_cdk::api::time();
+                set_user_balance(&caller, bal);
+            }
+            Err(format!("Swap failed: {}", e))
+        }
+        Err(e) => {
+            // Call failed — refund ICP
+            if pay_symbol.to_uppercase() == "ICP" {
+                let e8s = pay_amount_raw as u64;
+                let mut bal = get_user_balance(&caller);
+                bal.available_e8s += e8s + pay_token.fee;
+                bal.pending_e8s = bal.pending_e8s.saturating_sub(e8s + pay_token.fee);
+                bal.updated_at = ic_cdk::api::time();
+                set_user_balance(&caller, bal);
+            }
+            Err(format!("Swap call failed: {:?}", e))
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  User profile endpoints
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -2132,46 +2532,84 @@ async fn chat(prompt: String) -> Result<String, String> {
     // ── Tool loop: detect tool_calls → execute → re-call with result ──
     let reply;
     if has_tool_call(&response.body) {
-        // Extract search query from tool call; fallback = user's original prompt
-        let query = extract_tool_call(&response.body)
-            .map(|(_, q)| q)
-            .unwrap_or_else(|| prompt.clone());
+        let tool_name = extract_tool_name(&response.body);
 
-        // Execute search
-        let tool_result = match pico_search(&query).await {
-            Ok(results) => {
-                let label: String = query.chars().take(60).collect();
-                store_web_entry(&format!("search: {}", label), &results);
-                results.chars().take(6000).collect::<String>()
-            }
-            Err(e) => format!("Search failed: {}", e),
-        };
+        if tool_name.as_deref() == Some("token_swap") {
+            // ── token_swap tool ──
+            let tool_result = match extract_swap_args(&response.body) {
+                Some((pay_sym, pay_amt, recv_sym)) => {
+                    match swap_execute(pay_sym.clone(), pay_amt.clone(), recv_sym.clone()).await {
+                        Ok(msg) => format!("Swap successful: {}", msg),
+                        Err(e) => format!("Swap failed: {}", e),
+                    }
+                }
+                None => "Could not parse swap arguments from tool call".to_string(),
+            };
 
-        // Re-call LLM with search results injected into user prompt (no tools).
-        // Note: proper tool_calls→tool message flow fails on Chutes/DeepSeek,
-        // so we use the simpler approach of augmenting the user message.
-        let search_prompt = format!("{}\n\n[Search results for: {}]\n{}", augmented_prompt, query, tool_result);
-        let body2 = build_request_body_no_tools(&config, &search_prompt);
-        let req2 = HttpRequestArgs {
-            url: config.api_endpoint.clone(),
-            max_response_bytes: Some(config.max_response_bytes),
-            method: HttpMethod::POST,
-            headers: vec![
-                HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
-                HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
-            ],
-            body: Some(body2),
-            transform: None,
-            is_replicated: Some(false),
-        };
-        bump_metric(|m| m.total_calls += 1);
-        let b2 = ic_cdk::api::canister_cycle_balance();
-        let resp2 = mgmt_http_request(&req2).await
-            .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Search follow-up failed: {:?}", e) })?;
-        let b3 = ic_cdk::api::canister_cycle_balance();
-        bump_metric(|m| m.total_cycles_spent += b2.saturating_sub(b3) as u64);
-        reply = extract_content(&resp2.body)
-            .unwrap_or_else(|| "Search completed but could not parse follow-up".into());
+            // Re-call LLM with swap result (no tools)
+            let swap_prompt = format!("{}\n\n[Swap result]\n{}", augmented_prompt, tool_result);
+            let body2 = build_request_body_no_tools(&config, &swap_prompt);
+            let req2 = HttpRequestArgs {
+                url: config.api_endpoint.clone(),
+                max_response_bytes: Some(config.max_response_bytes),
+                method: HttpMethod::POST,
+                headers: vec![
+                    HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
+                    HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
+                ],
+                body: Some(body2),
+                transform: None,
+                is_replicated: Some(false),
+            };
+            bump_metric(|m| m.total_calls += 1);
+            let b2 = ic_cdk::api::canister_cycle_balance();
+            let resp2 = mgmt_http_request(&req2).await
+                .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Swap follow-up failed: {:?}", e) })?;
+            let b3 = ic_cdk::api::canister_cycle_balance();
+            bump_metric(|m| m.total_cycles_spent += b2.saturating_sub(b3) as u64);
+            reply = extract_content(&resp2.body)
+                .unwrap_or_else(|| tool_result);
+        } else {
+            // ── web_search tool (default) ──
+            let query = extract_tool_call(&response.body)
+                .map(|(_, q)| q)
+                .unwrap_or_else(|| prompt.clone());
+
+            let tool_result = match pico_search(&query).await {
+                Ok(results) => {
+                    let label: String = query.chars().take(60).collect();
+                    store_web_entry(&format!("search: {}", label), &results);
+                    results.chars().take(6000).collect::<String>()
+                }
+                Err(e) => format!("Search failed: {}", e),
+            };
+
+            // Re-call LLM with search results injected into user prompt (no tools).
+            // Note: proper tool_calls→tool message flow fails on Chutes/DeepSeek,
+            // so we use the simpler approach of augmenting the user message.
+            let search_prompt = format!("{}\n\n[Search results for: {}]\n{}", augmented_prompt, query, tool_result);
+            let body2 = build_request_body_no_tools(&config, &search_prompt);
+            let req2 = HttpRequestArgs {
+                url: config.api_endpoint.clone(),
+                max_response_bytes: Some(config.max_response_bytes),
+                method: HttpMethod::POST,
+                headers: vec![
+                    HttpHeader { name: "Content-Type".into(), value: "application/json".into() },
+                    HttpHeader { name: "Authorization".into(), value: format!("Bearer {}", api_key) },
+                ],
+                body: Some(body2),
+                transform: None,
+                is_replicated: Some(false),
+            };
+            bump_metric(|m| m.total_calls += 1);
+            let b2 = ic_cdk::api::canister_cycle_balance();
+            let resp2 = mgmt_http_request(&req2).await
+                .map_err(|e| { bump_metric(|m| m.errors += 1); format!("Search follow-up failed: {:?}", e) })?;
+            let b3 = ic_cdk::api::canister_cycle_balance();
+            bump_metric(|m| m.total_cycles_spent += b2.saturating_sub(b3) as u64);
+            reply = extract_content(&resp2.body)
+                .unwrap_or_else(|| "Search completed but could not parse follow-up".into());
+        }
     } else {
         reply = extract_content(&response.body).ok_or_else(|| {
             bump_metric(|m| m.errors += 1);

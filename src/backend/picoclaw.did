@@ -63,6 +63,12 @@ type TxRecord = record {
     status : nat8;
 };
 
+type TokenBalance = record {
+    symbol : text;
+    balance_raw : nat64;
+    decimals : nat8;
+};
+
 type HttpHeader = record { name : text; value : text };
 type HttpResponse = record { status : nat; headers : vec HttpHeader; body : vec nat8 };
 type TransformArgs = record { response : HttpResponse; context : vec nat8 };
@@ -119,6 +125,11 @@ service : {
     "wallet_notify_deposit" : () -> (variant { Ok : text; Err : text });
     "wallet_withdraw" : (nat64) -> (variant { Ok : text; Err : text });
     "wallet_tx_history" : (nat64) -> (vec TxRecord) query;
+
+    // KongSwap (token swaps)
+    "swap_quote" : (text, text, text) -> (variant { Ok : text; Err : text });
+    "swap_execute" : (text, text, text) -> (variant { Ok : text; Err : text });
+    "token_balances" : () -> (variant { Ok : vec TokenBalance; Err : text });
 
     // On-chain tools (free queries)
     "principal_to_account_id" : (text) -> (variant { Ok : text; Err : text }) query;
